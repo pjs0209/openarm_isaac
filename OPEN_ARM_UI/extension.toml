@@ -1,0 +1,11 @@
+[package]
+title = "OpenArm OnePanel"
+version = "0.1.0"
+category = "User"
+
+[dependencies]
+"omni.ui" = {}
+"omni.isaac.core" = {}
+
+[[python.module]]
+name = "OPEN_ARM_UI"
