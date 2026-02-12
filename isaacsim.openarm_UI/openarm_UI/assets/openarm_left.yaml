@@ -1,0 +1,151 @@
+# The robot description defines the generalized coordinates and how to map those
+# to the underlying URDF dofs.
+
+api_version: 1.0
+
+# Defines the generalized coordinates. Each generalized coordinate is assumed
+# to have an entry in the URDF.
+# Lula will only use these joints to control the robot position.
+cspace:
+    - openarm_left_joint1
+    - openarm_left_joint2
+    - openarm_left_joint3
+    - openarm_left_joint4
+    - openarm_left_joint5
+    - openarm_left_joint6
+    - openarm_left_joint7
+default_q: [
+    -0.0,0.0,0.0,0.0,-0.0,-0.0,0.0
+]
+
+acceleration_limits: [
+   10,10,10,10,10,10,10
+]
+
+jerk_limits: [
+   10000,10000,10000,10000,10000,10000,10000
+]
+
+# Most dimensions of the cspace have a direct corresponding element
+# in the URDF. This list of rules defines how unspecified coordinates
+# should be extracted or how values in the URDF should be overwritten.
+
+cspace_to_urdf_rules:
+    - {name: openarm_right_joint1, rule: fixed, value: 0.0}
+    - {name: openarm_right_joint2, rule: fixed, value: -0.0}
+    - {name: openarm_right_joint3, rule: fixed, value: -0.0}
+    - {name: openarm_right_joint4, rule: fixed, value: 0.0}
+    - {name: openarm_right_joint5, rule: fixed, value: -0.0}
+    - {name: openarm_right_joint6, rule: fixed, value: 0.0}
+    - {name: openarm_right_joint7, rule: fixed, value: -0.0}
+    - {name: openarm_left_finger_joint1, rule: fixed, value: 0.0}
+    - {name: openarm_left_finger_joint2, rule: fixed, value: -0.0}
+    - {name: openarm_right_finger_joint1, rule: fixed, value: 0.0}
+    - {name: openarm_right_finger_joint2, rule: fixed, value: 0.0}
+    - {name: openarm_left_ee_tcp_joint, rule: fixed, value: 0.0}
+    - {name: openarm_right_ee_tcp_joint, rule: fixed, value: 0.0}
+
+# Lula uses collision spheres to define the robot geometry in order to avoid
+# collisions with external obstacles.  If no spheres are specified, Lula will
+# not be able to avoid obstacles.
+
+collision_spheres:
+  - openarm_body_link:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.045
+    - "center": [0.0, 0.0, 0.609]
+      "radius": 0.045
+    - "center": [0.0, 0.0, 0.068]
+      "radius": 0.045
+    - "center": [0.0, 0.0, 0.135]
+      "radius": 0.045
+    - "center": [0.0, 0.0, 0.203]
+      "radius": 0.045
+    - "center": [0.0, 0.0, 0.271]
+      "radius": 0.045
+    - "center": [0.0, 0.0, 0.338]
+      "radius": 0.045
+    - "center": [0.0, 0.0, 0.406]
+      "radius": 0.045
+    - "center": [0.0, 0.0, 0.474]
+      "radius": 0.045
+    - "center": [0.0, 0.0, 0.541]
+      "radius": 0.045
+    - "center": [0.0, 0.0, 0.714]
+      "radius": 0.07
+    - "center": [0.0, 0.0, 0.665]
+      "radius": 0.07
+  - openarm_left_link1:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.06
+    - "center": [-0.0, -0.0, 0.056]
+      "radius": 0.06
+  - openarm_left_link2:
+    - "center": [0.024, -0.0, 0.0]
+      "radius": 0.06
+  - openarm_left_link3:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.05
+    - "center": [-0.0, -0.0, 0.062]
+      "radius": 0.05
+  - openarm_left_link4:
+    - "center": [-0.0, -0.031, -0.0]
+      "radius": 0.05
+    - "center": [-0.0, -0.031, 0.067]
+      "radius": 0.05
+  - openarm_left_link5:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.04
+    - "center": [-0.0, -0.0, 0.069]
+      "radius": 0.04
+    - "center": [-0.0, -0.0, 0.035]
+      "radius": 0.04
+  - openarm_left_link6:
+    - "center": [-0.038, 0.0, -0.017]
+      "radius": 0.04
+    - "center": [-0.039, -0.0, 0.01]
+      "radius": 0.04
+  - openarm_left_link7:
+    - "center": [-0.0, -0.0, 0.039]
+      "radius": 0.04
+    - "center": [-0.0, -0.0, 0.067]
+      "radius": 0.04
+    - "center": [-0.0, -0.0, 0.092]
+      "radius": 0.04
+  - openarm_right_link1:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.06
+    - "center": [0.0, 0.0, 0.056]
+      "radius": 0.06
+  - openarm_right_link2:
+    - "center": [0.024, 0.0, 0.0]
+      "radius": 0.06
+  - openarm_right_link3:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.05
+    - "center": [0.0, 0.0, 0.062]
+      "radius": 0.05
+  - openarm_right_link4:
+    - "center": [0.0, -0.031, 0.0]
+      "radius": 0.05
+    - "center": [0.0, -0.031, 0.067]
+      "radius": 0.05
+  - openarm_right_link5:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.04
+    - "center": [0.0, 0.0, 0.069]
+      "radius": 0.04
+    - "center": [0.0, 0.0, 0.035]
+      "radius": 0.04
+  - openarm_right_link6:
+    - "center": [-0.038, 0.0, -0.017]
+      "radius": 0.04
+    - "center": [-0.038, 0.0, 0.01]
+      "radius": 0.04
+  - openarm_right_link7:
+    - "center": [0.0, 0.0, 0.039]
+      "radius": 0.04
+    - "center": [0.0, 0.0, 0.067]
+      "radius": 0.04
+    - "center": [0.0, 0.0, 0.092]
+      "radius": 0.04

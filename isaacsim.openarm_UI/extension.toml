@@ -1,0 +1,11 @@
+[package]
+title = "OpenArm UI"
+version = "0.1.0"
+category = "User"
+
+[dependencies]
+"omni.ui" = {}
+"omni.isaac.core" = {}
+
+[[python.module]]
+name = "openarm_UI"

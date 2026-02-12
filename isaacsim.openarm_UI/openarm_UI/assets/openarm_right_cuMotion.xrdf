@@ -1,0 +1,199 @@
+format: "xrdf"
+
+format_version: 1.0
+
+default_joint_positions: 
+  openarm_left_joint1: -0.0
+  openarm_right_joint1: 0.0
+  openarm_left_joint2: 0.0
+  openarm_right_joint2: -0.0
+  openarm_left_joint3: 0.0
+  openarm_right_joint3: -0.0
+  openarm_left_joint4: 0.0
+  openarm_right_joint4: 0.0
+  openarm_left_joint5: -0.0
+  openarm_right_joint5: -0.0
+  openarm_left_joint6: -0.0
+  openarm_right_joint6: 0.0
+  openarm_left_joint7: 0.0
+  openarm_right_joint7: -0.0
+  openarm_left_finger_joint1: 0.0
+  openarm_left_finger_joint2: -0.0
+  openarm_left_hand: -0.0
+  openarm_right_finger_joint1: 0.0
+  openarm_right_finger_joint2: 0.0
+  openarm_right_hand: -0.0
+  openarm_left_ee_tcp_joint: 0.0
+  openarm_right_ee_tcp_joint: 0.0
+
+cspace: 
+  joint_names: 
+    - "openarm_right_joint1"
+    - "openarm_right_joint2"
+    - "openarm_right_joint3"
+    - "openarm_right_joint4"
+    - "openarm_right_joint5"
+    - "openarm_right_joint6"
+    - "openarm_right_joint7"
+  acceleration_limits: [10, 10, 10, 10, 10, 10, 10]
+  jerk_limits: [10000, 10000, 10000, 10000, 10000, 10000, 10000]
+
+collision: 
+  geometry: "auto_generated_collision_sphere_group"
+
+self_collision: 
+  geometry: "auto_generated_collision_sphere_group"
+  ignore: 
+    openarm_body_link: 
+      - "openarm_left_link1"
+      - "openarm_right_link1"
+    openarm_left_link1: 
+      - "openarm_left_link2"
+      - "openarm_right_link1"
+    openarm_left_link2: 
+      - "openarm_left_link3"
+    openarm_left_link3: 
+      - "openarm_left_link4"
+    openarm_left_link4: 
+      - "openarm_left_link5"
+    openarm_left_link5: 
+      - "openarm_left_link6"
+    openarm_left_link6: 
+      - "openarm_left_link7"
+    openarm_left_link7: 
+      - "openarm_left_right_finger"
+      - "openarm_left_left_finger"
+      - "openarm_left_hand"
+    openarm_left_hand: 
+      - "openarm_left_ee_tcp"
+    openarm_right_link1: 
+      - "openarm_right_link2"
+    openarm_right_link2: 
+      - "openarm_right_link3"
+    openarm_right_link3: 
+      - "openarm_right_link4"
+    openarm_right_link4: 
+      - "openarm_right_link5"
+    openarm_right_link5: 
+      - "openarm_right_link6"
+    openarm_right_link6: 
+      - "openarm_right_link7"
+    openarm_right_link7: 
+      - "openarm_right_right_finger"
+      - "openarm_right_left_finger"
+      - "openarm_right_hand"
+    openarm_right_hand: 
+      - "openarm_right_ee_tcp"
+    openarm_left_right_finger: 
+      - "openarm_left_left_finger"
+      - "openarm_left_hand"
+    openarm_left_left_finger: 
+      - "openarm_left_hand"
+    openarm_right_right_finger: 
+      - "openarm_right_left_finger"
+      - "openarm_right_hand"
+    openarm_right_left_finger: 
+      - "openarm_right_hand"
+
+geometry: 
+  auto_generated_collision_sphere_group: 
+    spheres: 
+      openarm_body_link: 
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.045
+        - center: [0.0, 0.0, 0.609]
+          radius: 0.045
+        - center: [0.0, 0.0, 0.068]
+          radius: 0.045
+        - center: [0.0, 0.0, 0.135]
+          radius: 0.045
+        - center: [0.0, 0.0, 0.203]
+          radius: 0.045
+        - center: [0.0, 0.0, 0.271]
+          radius: 0.045
+        - center: [0.0, 0.0, 0.338]
+          radius: 0.045
+        - center: [0.0, 0.0, 0.406]
+          radius: 0.045
+        - center: [0.0, 0.0, 0.474]
+          radius: 0.045
+        - center: [0.0, 0.0, 0.541]
+          radius: 0.045
+        - center: [0.0, 0.0, 0.714]
+          radius: 0.07
+        - center: [0.0, 0.0, 0.665]
+          radius: 0.07
+      openarm_left_link1: 
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.06
+        - center: [-0.0, -0.0, 0.056]
+          radius: 0.06
+      openarm_left_link2: 
+        - center: [0.024, -0.0, 0.0]
+          radius: 0.06
+      openarm_left_link3: 
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.05
+        - center: [-0.0, -0.0, 0.062]
+          radius: 0.05
+      openarm_left_link4: 
+        - center: [-0.0, -0.031, -0.0]
+          radius: 0.05
+        - center: [-0.0, -0.031, 0.067]
+          radius: 0.05
+      openarm_left_link5: 
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.04
+        - center: [-0.0, -0.0, 0.069]
+          radius: 0.04
+        - center: [-0.0, -0.0, 0.035]
+          radius: 0.04
+      openarm_left_link6: 
+        - center: [-0.038, 0.0, -0.017]
+          radius: 0.04
+        - center: [-0.039, -0.0, 0.01]
+          radius: 0.04
+      openarm_left_link7: 
+        - center: [-0.0, -0.0, 0.039]
+          radius: 0.04
+        - center: [-0.0, -0.0, 0.067]
+          radius: 0.04
+        - center: [-0.0, -0.0, 0.092]
+          radius: 0.04
+      openarm_right_link1: 
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.06
+        - center: [0.0, 0.0, 0.056]
+          radius: 0.06
+      openarm_right_link2: 
+        - center: [0.024, 0.0, 0.0]
+          radius: 0.06
+      openarm_right_link3: 
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.05
+        - center: [0.0, 0.0, 0.062]
+          radius: 0.05
+      openarm_right_link4: 
+        - center: [0.0, -0.031, 0.0]
+          radius: 0.05
+        - center: [0.0, -0.031, 0.067]
+          radius: 0.05
+      openarm_right_link5: 
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.04
+        - center: [0.0, 0.0, 0.069]
+          radius: 0.04
+        - center: [0.0, 0.0, 0.035]
+          radius: 0.04
+      openarm_right_link6: 
+        - center: [-0.038, 0.0, -0.017]
+          radius: 0.04
+        - center: [-0.038, 0.0, 0.01]
+          radius: 0.04
+      openarm_right_link7: 
+        - center: [0.0, 0.0, 0.039]
+          radius: 0.04
+        - center: [0.0, 0.0, 0.067]
+          radius: 0.04
+        - center: [0.0, 0.0, 0.092]
+          radius: 0.04
