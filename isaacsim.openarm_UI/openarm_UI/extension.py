@@ -1,29 +1,31 @@
+# Isaac Sim 및 관련 라이브러리 임포트
 import os
 import math
 import numpy as np
 import traceback
 
-import omni.ext
-import omni.ui as ui
-import omni.timeline
+import omni.ext  # 엔비디아 옴니버스 확장 프로그램 라이브러리
+import omni.ui as ui  # 옴니버스 사용자 인터페이스(UI) 제작 라이브러리
+import omni.timeline  # 타임라인(시뮬레이션 시간) 제어
 import omni.kit.app
-import omni.usd
+import omni.usd  # USD(Universal Scene Description) 데이터 처리
 from isaacsim.core.utils.rotations import euler_angles_to_quat, matrix_to_euler_angles
-from pxr import UsdGeom, Gf, Usd
+from pxr import UsdGeom, Gf, Usd  # USD 지오메트리 및 기본 클래스
 
-from omni.isaac.dynamic_control import _dynamic_control
-from isaacsim.core.prims import SingleArticulation
-from isaacsim.core.utils.types import ArticulationAction
+from omni.isaac.dynamic_control import _dynamic_control  # 로봇 물리 제어용 인터페이스
+from isaacsim.core.prims import SingleArticulation  # 관절 구조물(로봇) 핵심 모듈
+from isaacsim.core.utils.types import ArticulationAction  # 로봇 제어 명령 형식
 
 from isaacsim.robot_motion.motion_generation.lula.kinematics import LulaKinematicsSolver
 from isaacsim.robot_motion.motion_generation.articulation_kinematics_solver import ArticulationKinematicsSolver
 
 
 # =========================
-# DOF Configuration
+# DOF(Degree Of Freedom) 조인트 설정
 # =========================
+# 화면(UI)에 표시할 관절 리스트입니다.
 VISIBLE_DOFS = [
-    # Left arm
+    # 왼쪽 팔
     "openarm_left_joint1",
     "openarm_left_joint2",
     "openarm_left_joint3",
@@ -33,7 +35,7 @@ VISIBLE_DOFS = [
     "openarm_left_joint7",
     "openarm_left_finger_joint1",
 
-    # Right arm
+    # 오른쪽 팔
     "openarm_right_joint1",
     "openarm_right_joint2",
     "openarm_right_joint3",
@@ -154,9 +156,12 @@ class OpenArmAutoController(omni.ext.IExt):
     """
 
     def on_startup(self, ext_id):
-        print("=== LOADED: openarm_UI/extension.py LULA-ARTIK-UI-2026-02-23 ===")
+        """
+        확장 프로그램이 처음 시작(로드)될 때 호출되는 초기화 함수입니다.
+        """
+        print("=== 초기화 시작: OpenArm UI 제어패널 ===")
 
-        # Prevent duplicate window
+        # 이전 윈도우가 열려있다면 정리합니다.
         if getattr(self, "window", None) is not None:
             try:
                 self.window.destroy()
@@ -166,22 +171,22 @@ class OpenArmAutoController(omni.ext.IExt):
 
         self._ext_id = ext_id
 
-        # Auto-load USD
+        # 1. 로봇 USD 파일을 자동으로 불러옵니다.
         self._auto_open_stage(ext_id)
 
-        # Robot root prim (default)
+        # 로봇이 위치한 최상위 경로 설정
         self.robot_root_prim = "/World/openarm"
 
-        # Dynamic Control
-        self.dc = _dynamic_control.acquire_dynamic_control_interface()
-        self._bound = False
-        self.art = 0  # dc articulation handle
+        # 2. 로봇 제어 인터페이스 초기화
+        self.dc = _dynamic_control.acquire_dynamic_control_interface() # 물리 제어용
+        self._bound = False # 로봇과 연결되었는지 여부
+        self.art = 0  # 로봇 핸들 ID
 
-        # SingleArticulation (for IK)
-        self.articulation = None  # SingleArticulation
+        # IK(Inversed Kinematics) 연동 준비
+        self.articulation = None  # 관절 구조체 객체
         self._articulation_ready = False
 
-        # Lula + ArticulationKinematicsSolver
+        # Lula 솔버 (ISAAC SIM의 차세대 운동학 엔진)
         self.lula_left = None
         self.lula_right = None
         self.artik_left = None
@@ -189,60 +194,41 @@ class OpenArmAutoController(omni.ext.IExt):
         self._lula_ready = False
         self._lula_failed = False
 
-        # EE frame names
+        # 끝단(EE: End-Effector)의 조인트 이름 정의
         self.ee_left = "openarm_left_ee_tcp"
         self.ee_right = "openarm_right_ee_tcp"
 
-        # dof_handle -> target rad/raw
-        self.targets = {}
+        # 데이터 저장을 위한 변수들
+        self.targets = {} # 조인트별 목표 위치값
+        self.slider_by_dof = {} # 화면의 슬라이더 객체 저장
+        self.dof_handle_by_name = {} # 이름으로 물리 조인트 핸들 찾기
+        self.cur_tgt_labels = {} # 현재/목표 값을 표시하는 텍스트 라벨
 
-        # dof_handle -> ui.FloatSlider
-        self.slider_by_dof = {}
-        # dof_handle -> dof_name
-        self.dof_name_by_handle = {}
-        # dof_name -> dof_handle
-        self.dof_handle_by_name = {}
-        # dof_handle -> label
-        self.cur_tgt_labels = {}
+        self._active_tab = "left" # 현재 보고 있는 탭 (왼쪽/오른쪽)
 
-        self._active_tab = "left"
+        # 제어 모드 설정: "JOINT"(직접 조작) 또는 "LULA_IK"(목표 좌표 따라가기)
+        self.mode = "JOINT" 
 
-        # =========================
-        # Mode / Targets
-        # =========================
-        self.mode = "JOINT"  # "JOINT" or "LULA_IK"
-
+        # IK 모드에서 사용할 목표(큐브)의 경로
         self.left_target_prim = "/World/Targets/Left"
         self.right_target_prim = "/World/Targets/Right"
 
-        # UI target value store
-        self._tgtL = {"x": 0.0, "y": 0.1535, "z": 0.0689}
-        self._tgtR = {"x": 0.0, "y": -0.1535, "z": 0.0689}
+        # 목표 좌표(XYZ) 초기값
+        self._tgtL = {"x": 0.0, "y": 0.1535, "z": 0.0820}
+        self._tgtR = {"x": 0.0, "y": -0.1535, "z": 0.0820}
 
-        # Orientation: RPY (Roll, Pitch, Yaw) in degrees
+        # 목표 방향(Roll, Pitch, Yaw) 초기값
         self._rpyL = {"roll": 180.0, "pitch": 0.0, "yaw": 0.0}
         self._rpyR = {"roll": 180.0, "pitch": 0.0, "yaw": 0.0}
 
-        # Orientation Toggle Flags
-        self._use_oriL = False
-        self._use_oriR = False
-
-        # Target UI slider references
-        self._tgt_sliders_L = {}
-        self._tgt_sliders_R = {}
-        self._rpy_sliders_L = {}
-        self._rpy_sliders_R = {}
-
-        self._is_syncing = False
-        self._last_status = None
-        self._printed_tb = False
-
+        # 3. 사용자 인터페이스(UI)를 만듭니다.
         self._build_ui()
 
+        # 4. 시뮬레이션 매 프레임(Update)마다 실행될 함수를 등록합니다.
         app = omni.kit.app.get_app()
         self._sub = app.get_update_event_stream().create_subscription_to_pop(self._on_update)
 
-        self._set_status("Press Play to start")
+        self._set_status("시뮬레이션 재생(Play) 버튼을 눌러주세요.")
 
     # =========================
     # USD Load
@@ -558,11 +544,13 @@ class OpenArmAutoController(omni.ext.IExt):
 
     # ---------------- Update / Binding ----------------
     def _on_update(self, e):
+        """
+        시뮬레이션이 돌아가는 동안 매 순간(프레임) 실행되는 메인 루프입니다.
+        """
         timeline = omni.timeline.get_timeline_interface()
         is_playing = timeline.is_playing()
 
-        # If simulation STOPPED, perform a soft reset so we re-bind on next Play.
-        # This prevents using stale physics handles.
+        # 시뮬레이션이 중지되었다면 하드웨어 연결 정보를 초기화합니다.
         if not is_playing and self._bound:
             self._bound = False
             self._articulation_ready = False
@@ -570,72 +558,73 @@ class OpenArmAutoController(omni.ext.IExt):
             self.articulation = None
             self.artik_left = None
             self.artik_right = None
-            self._set_status("Simulation stopped. Ready to re-bind.")
+            self._set_status("시뮬레이션 중지. 재생 버튼을 누르면 다시 연결됩니다.")
 
-        # Post-binding update loop
+        # 로봇과 성공적으로 연결된 상태라면 (시뮬레이션 실행 중)
         if self._bound:
             stage = omni.usd.get_context().get_stage()
             if stage is not None:
+                # 3D 화면의 목표 좌표계(Cube)를 UI 값과 동기화합니다.
                 self._ensure_target_prims(stage)
                 self._sync_targets_to_stage()
 
-            # Apply IK action in LULA_IK mode
+            # IK(기구학) 모드인 경우: 목표 큐브를 향해 로봇이 움직이도록 계산하여 명령을 내립니다.
             if self.mode == "LULA_IK" and self._lula_ready and self._articulation_ready:
                 try:
                     self._step_lula_ik(stage)
                 except Exception:
                     if not self._printed_tb:
                         self._printed_tb = True
-                        print("=== IK STEP TRACEBACK ===")
+                        print("=== IK 연산 오류 발생 ===")
                         print(traceback.format_exc())
 
-            # Apply dof targets in JOINT mode
+            # 직접 운전(JOINT) 모드인 경우: 슬라이더 값을 물리 엔진에 직접 전달합니다.
             if self.mode == "JOINT":
                 try:
-                    self.dc.wake_up_articulation(self.art)
+                    self.dc.wake_up_articulation(self.art) # 물리 엔진 활성화
                 except Exception:
                     pass
 
                 for dof, tgt in self.targets.items():
                     try:
+                        # 물리 엔진의 각 조인트에 목표 위치값을 입력합니다.
                         self.dc.set_dof_position_target(dof, float(tgt))
                     except Exception:
                         pass
 
+            # 화면에 현재 로봇의 실제 위치값을 실시간으로 갱신합니다.
             self._refresh_current_labels()
             return
 
-        # Pre-binding: wait for Play
+        # 시뮬레이션이 아직 시작되지 않았다면 대기 메시지를 표시합니다.
         if not is_playing:
-            self._set_status("Press Play to start")
+            self._set_status("재생 버튼(Play)을 눌러 하드웨어를 활성화하세요.")
             return
 
+        # 재생 버튼을 눌렀다면, 실제 로봇(Articulation)을 찾아 연결을 시도합니다.
         stage = omni.usd.get_context().get_stage()
         if stage is None:
-            self._set_status("Stage not ready...")
+            self._set_status("화면 데이터(Stage)가 준비되지 않았습니다.")
             return
 
-        # 1) dynamic_control articulation bind
+        # 1) 로봇 물체를 물리 엔진 핸들로 가져옵니다.
         art = self.dc.get_articulation(self.robot_root_prim)
         if art == 0:
-            # Search under /World
+            # 설정한 경로에 없다면 전체 씬에서 찾아봅니다.
             found_path, found_art = self._probe_articulation_under(stage, "/World")
             if found_art != 0:
                 art = found_art
 
         if art == 0:
-            self._set_status("Searching articulation...")
+            self._set_status("로봇 물체를 찾는 중...")
             return
 
+        # 2) 찾은 로봇을 조작 준비(Bind) 상태로 만듭니다.
         self._bind(art, self.robot_root_prim)
 
-        # 2) SingleArticulation initialize (for IK)
+        # 3) IK 로직과 3D 화면 요소들을 준비합니다.
         self._init_single_articulation(stage)
-
-        # 3) Lula + ArticulationKinematicsSolver init
         self._init_lula_and_artik()
-
-        # Create target prims
         self._ensure_target_prims(stage)
         self._sync_targets_to_stage()
 
