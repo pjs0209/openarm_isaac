@@ -216,12 +216,12 @@ class OpenArmAutoController(omni.ext.IExt):
         self.right_target_prim = "/World/Targets/Right"
 
         # UI target value store
-        self._tgtL = {"x": 0.35, "y": 0.25, "z": 0.25}
-        self._tgtR = {"x": 0.35, "y": -0.25, "z": 0.25}
+        self._tgtL = {"x": 0.0, "y": 0.1535, "z": 0.0689}
+        self._tgtR = {"x": 0.0, "y": -0.1535, "z": 0.0689}
 
         # Orientation: RPY (Roll, Pitch, Yaw) in degrees
-        self._rpyL = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}
-        self._rpyR = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}
+        self._rpyL = {"roll": 180.0, "pitch": 0.0, "yaw": 0.0}
+        self._rpyR = {"roll": 180.0, "pitch": 0.0, "yaw": 0.0}
 
         # Orientation Toggle Flags
         self._use_oriL = False
@@ -300,8 +300,8 @@ class OpenArmAutoController(omni.ext.IExt):
 
         self.window = ui.Window(
             "OpenArm Controller",
-            width=520,
-            height=900,
+            width=540,
+            height=950,
             dockPreference=ui.DockPreference.LEFT,
         )
 
@@ -334,24 +334,22 @@ class OpenArmAutoController(omni.ext.IExt):
                     self.tab_right_btn = ui.Button("Right", width=65, clicked_fn=lambda: self._show_tab("right"),
                                                    style={"font_size": 13, "color": CLR_RIGHT})
 
-                # -- Target Sliders (for LULA_IK mode) --
-                self.target_ui_frame = ui.CollapsableFrame(
-                    "IK Target Position", collapsed=False,
-                    style={"font_size": 14, "color": CLR_TEXT}
-                )
-                with self.target_ui_frame:
-                    self._build_target_ui()
-
-                # -- Joint Sliders --
-                self.joint_ui_frame = ui.CollapsableFrame(
-                    "Joint Control", collapsed=False,
-                    style={"font_size": 14, "color": CLR_TEXT}
-                )
-                with self.joint_ui_frame:
-                    with ui.ScrollingFrame(height=550):
-                        with ui.VStack(spacing=8):
-                            self.left_container = ui.VStack(spacing=4)
-                            self.right_container = ui.VStack(spacing=4)
+                # -- Mode Content Area (Window Swap) --
+                with ui.ZStack():
+                    # Container for LULA_IK mode
+                    self.mode_ik_container = ui.VStack(visible=False, spacing=6)
+                    with self.mode_ik_container:
+                        with ui.ScrollingFrame(height=800):
+                            with ui.VStack(spacing=8):
+                                self._build_target_ui()
+                    
+                    # Container for JOINT mode
+                    self.mode_joint_container = ui.VStack(visible=True, spacing=6)
+                    with self.mode_joint_container:
+                        with ui.ScrollingFrame(height=800):
+                            with ui.VStack(spacing=8):
+                                self.left_container = ui.VStack(spacing=4)
+                                self.right_container = ui.VStack(spacing=4)
 
         self._show_tab(self._active_tab)
         self._apply_mode_ui()
@@ -360,101 +358,133 @@ class OpenArmAutoController(omni.ext.IExt):
         st = self._style()
 
         def slider_row(label, vmin, vmax, init, on_change, color=CLR_TEXT):
-            with ui.HStack(height=24, spacing=4):
-                ui.Label(label, width=24, style={"font_size": 14, "color": color})
+            with ui.HStack(height=24, spacing=6):
+                ui.Label(label, width=20, style={"font_size": 14, "color": color})
                 s = ui.FloatSlider(min=vmin, max=vmax, style={"font_size": 12})
                 s.model.set_value(float(init))
                 s.model.add_value_changed_fn(lambda m: on_change(float(m.get_value_as_float())))
             return s
 
-        with ui.VStack(spacing=8):
-            ui.Label("In LULA_IK mode, arms follow target position and orientation.", style=st["muted"])
+        with ui.VStack(spacing=15):
+            ui.Label("In LULA_IK mode, arms follow target position and orientation.", style=st["muted"], height=20)
 
-            # Left Target
-            with ui.ZStack(height=180):
-                ui.Rectangle(style={"background_color": 0x15FFFFFF, "border_radius": 6})
-                with ui.VStack(spacing=4):
-                    ui.Spacer(height=4)
-                    with ui.HStack():
-                        ui.Spacer(width=8)
-                        ui.Label("Left Target", style={"font_size": 14, "color": CLR_LEFT})
-                    with ui.HStack():
-                        ui.Spacer(width=8)
-                        with ui.VStack(spacing=2):
-                            with ui.HStack(height=24):
-                                ui.Label("Position", style=st["muted"], width=100)
-                                ui.Spacer()
-                                ui.Label("Orient", style=st["muted"], width=50)
-                                self._cb_oriL = ui.CheckBox(width=20)
-                                self._cb_oriL.model.set_value(self._use_oriL)
-                                self._cb_oriL.model.add_value_changed_fn(lambda m: self._on_toggle_ori("L", m.get_value_as_bool()))
-                            
-                            self._tgt_sliders_L["x"] = slider_row("X", -1.0, 1.0, self._tgtL["x"],
-                                lambda v: self._on_target_slider("L", "x", v), CLR_LEFT)
-                            self._tgt_sliders_L["y"] = slider_row("Y", -1.0, 1.0, self._tgtL["y"],
-                                lambda v: self._on_target_slider("L", "y", v), CLR_LEFT)
-                            self._tgt_sliders_L["z"] = slider_row("Z", 0.0, 1.5, self._tgtL["z"],
-                                lambda v: self._on_target_slider("L", "z", v), CLR_LEFT)
-                            ui.Spacer(height=2)
-                            ui.Label("Orientation (RPY deg)", style=st["muted"])
-                            self._rpy_sliders_L["roll"] = slider_row("R", -180.0, 180.0, self._rpyL["roll"],
-                                lambda v: self._on_target_rpy_slider("L", "roll", v), CLR_LEFT)
-                            self._rpy_sliders_L["pitch"] = slider_row("P", -90.0, 90.0, self._rpyL["pitch"],
-                                lambda v: self._on_target_rpy_slider("L", "pitch", v), CLR_LEFT)
-                            self._rpy_sliders_L["yaw"] = slider_row("Y", -180.0, 180.0, self._rpyL["yaw"],
-                                lambda v: self._on_target_rpy_slider("L", "yaw", v), CLR_LEFT)
-                        ui.Spacer(width=8)
+            # --- Left Target Card ---
+            with ui.ZStack(height=240):
+                ui.Rectangle(style={"background_color": 0x40151515, "border_radius": 10})
+                with ui.VStack(spacing=2):
+                    ui.Spacer(height=10)
+                    # Title Row
+                    with ui.HStack(height=24):
+                        ui.Spacer(width=15)
+                        ui.Label("Left Arm Target", style={"font_size": 15, "color": CLR_LEFT})
+                        ui.Spacer(width=15)
+                    
+                    # Position Header & Checkbox
+                    with ui.HStack(height=24):
+                        ui.Spacer(width=15)
+                        ui.Label("Position Targets", style=st["muted"], width=120)
+                        ui.Spacer()
+                        ui.Label("Orient", style=st["muted"], width=50)
+                        self._cb_oriL = ui.CheckBox(width=20, style={"color": 0xFF000000})
+                        self._cb_oriL.model.set_value(self._use_oriL)
+                        self._cb_oriL.model.add_value_changed_fn(lambda m: self._on_toggle_ori("L", m.get_value_as_bool()))
+                        ui.Spacer(width=15)
 
-            ui.Spacer(height=2)
+                    # Position Sliders
+                    with ui.HStack(height=72): # 3 * 24
+                        ui.Spacer(width=15)
+                        with ui.VStack(spacing=0):
+                            self._tgt_sliders_L["x"] = slider_row("X", -1.0, 1.0, self._tgtL["x"], lambda v: self._on_target_slider("L", "x", v), CLR_LEFT)
+                            self._tgt_sliders_L["y"] = slider_row("Y", -1.0, 1.0, self._tgtL["y"], lambda v: self._on_target_slider("L", "y", v), CLR_LEFT)
+                            self._tgt_sliders_L["z"] = slider_row("Z", 0.0, 1.5, self._tgtL["z"], lambda v: self._on_target_slider("L", "z", v), CLR_LEFT)
+                        ui.Spacer(width=15)
 
-            # Right Target
-            with ui.ZStack(height=180):
-                ui.Rectangle(style={"background_color": 0x15FFFFFF, "border_radius": 6})
-                with ui.VStack(spacing=4):
-                    ui.Spacer(height=4)
-                    with ui.HStack():
-                        ui.Spacer(width=8)
-                        ui.Label("Right Target", style={"font_size": 14, "color": CLR_RIGHT})
-                    with ui.HStack():
-                        ui.Spacer(width=8)
-                        with ui.VStack(spacing=2):
-                            with ui.HStack(height=24):
-                                ui.Label("Position", style=st["muted"], width=100)
-                                ui.Spacer()
-                                ui.Label("Orient", style=st["muted"], width=50)
-                                self._cb_oriR = ui.CheckBox(width=20)
-                                self._cb_oriR.model.set_value(self._use_oriR)
-                                self._cb_oriR.model.add_value_changed_fn(lambda m: self._on_toggle_ori("R", m.get_value_as_bool()))
+                    ui.Spacer(height=6)
 
-                            self._tgt_sliders_R["x"] = slider_row("X", -1.0, 1.0, self._tgtR["x"],
-                                lambda v: self._on_target_slider("R", "x", v), CLR_RIGHT)
-                            self._tgt_sliders_R["y"] = slider_row("Y", -1.0, 1.0, self._tgtR["y"],
-                                lambda v: self._on_target_slider("R", "y", v), CLR_RIGHT)
-                            self._tgt_sliders_R["z"] = slider_row("Z", 0.0, 1.5, self._tgtR["z"],
-                                lambda v: self._on_target_slider("R", "z", v), CLR_RIGHT)
-                            ui.Spacer(height=2)
-                            ui.Label("Orientation (RPY deg)", style=st["muted"])
-                            self._rpy_sliders_R["roll"] = slider_row("R", -180.0, 180.0, self._rpyR["roll"],
-                                lambda v: self._on_target_rpy_slider("R", "roll", v), CLR_RIGHT)
-                            self._rpy_sliders_R["pitch"] = slider_row("P", -90.0, 90.0, self._rpyR["pitch"],
-                                lambda v: self._on_target_rpy_slider("R", "pitch", v), CLR_RIGHT)
-                            self._rpy_sliders_R["yaw"] = slider_row("Y", -180.0, 180.0, self._rpyR["yaw"],
-                                lambda v: self._on_target_rpy_slider("R", "yaw", v), CLR_RIGHT)
-                        ui.Spacer(width=8)
+                    # Orientation Header
+                    with ui.HStack(height=20):
+                        ui.Spacer(width=15)
+                        ui.Label("Orientation (RPY Degrees)", style=st["muted"])
+                        ui.Spacer(width=15)
 
-            ui.Spacer(height=2)
+                    # Orientation Sliders
+                    with ui.HStack(height=72): # 3 * 24
+                        ui.Spacer(width=15)
+                        with ui.VStack(spacing=0):
+                            self._rpy_sliders_L["roll"] = slider_row("R", -180.0, 180.0, self._rpyL["roll"], lambda v: self._on_target_rpy_slider("L", "roll", v), CLR_LEFT)
+                            self._rpy_sliders_L["pitch"] = slider_row("P", -90.0, 90.0, self._rpyL["pitch"], lambda v: self._on_target_rpy_slider("L", "pitch", v), CLR_LEFT)
+                            self._rpy_sliders_L["yaw"] = slider_row("Y", -180.0, 180.0, self._rpyL["yaw"], lambda v: self._on_target_rpy_slider("L", "yaw", v), CLR_LEFT)
+                        ui.Spacer(width=15)
+                    ui.Spacer()
+
+            # --- Right Target Card ---
+            with ui.ZStack(height=240):
+                ui.Rectangle(style={"background_color": 0x40151515, "border_radius": 10})
+                with ui.VStack(spacing=2):
+                    ui.Spacer(height=10)
+                    # Title Row
+                    with ui.HStack(height=24):
+                        ui.Spacer(width=15)
+                        ui.Label("Right Arm Target", style={"font_size": 15, "color": CLR_RIGHT})
+                        ui.Spacer(width=15)
+                    
+                    # Position Header & Checkbox
+                    with ui.HStack(height=24):
+                        ui.Spacer(width=15)
+                        ui.Label("Position Targets", style=st["muted"], width=120)
+                        ui.Spacer()
+                        ui.Label("Orient", style=st["muted"], width=50)
+                        self._cb_oriR = ui.CheckBox(width=20, style={"color": 0xFF000000})
+                        self._cb_oriR.model.set_value(self._use_oriR)
+                        self._cb_oriR.model.add_value_changed_fn(lambda m: self._on_toggle_ori("R", m.get_value_as_bool()))
+                        ui.Spacer(width=15)
+
+                    # Position Sliders
+                    with ui.HStack(height=72):
+                        ui.Spacer(width=15)
+                        with ui.VStack(spacing=0):
+                            self._tgt_sliders_R["x"] = slider_row("X", -1.0, 1.0, self._tgtR["x"], lambda v: self._on_target_slider("R", "x", v), CLR_RIGHT)
+                            self._tgt_sliders_R["y"] = slider_row("Y", -1.0, 1.0, self._tgtR["y"], lambda v: self._on_target_slider("R", "y", v), CLR_RIGHT)
+                            self._tgt_sliders_R["z"] = slider_row("Z", 0.0, 1.5, self._tgtR["z"], lambda v: self._on_target_slider("R", "z", v), CLR_RIGHT)
+                        ui.Spacer(width=15)
+
+                    ui.Spacer(height=6)
+
+                    # Orientation Header
+                    with ui.HStack(height=20):
+                        ui.Spacer(width=15)
+                        ui.Label("Orientation (RPY Degrees)", style=st["muted"])
+                        ui.Spacer(width=15)
+
+                    # Orientation Sliders
+                    with ui.HStack(height=72):
+                        ui.Spacer(width=15)
+                        with ui.VStack(spacing=0):
+                            self._rpy_sliders_R["roll"] = slider_row("R", -180.0, 180.0, self._rpyR["roll"], lambda v: self._on_target_rpy_slider("R", "roll", v), CLR_RIGHT)
+                            self._rpy_sliders_R["pitch"] = slider_row("P", -90.0, 90.0, self._rpyR["pitch"], lambda v: self._on_target_rpy_slider("R", "pitch", v), CLR_RIGHT)
+                            self._rpy_sliders_R["yaw"] = slider_row("Y", -180.0, 180.0, self._rpyR["yaw"], lambda v: self._on_target_rpy_slider("R", "yaw", v), CLR_RIGHT)
+                        ui.Spacer(width=15)
+                    ui.Spacer()
+
+            ui.Spacer(height=5)
 
             with ui.HStack(height=28, spacing=6):
                 ui.Button("Reset Targets", clicked_fn=self._reset_targets,
                           style={"font_size": 13})
+                ui.Button("Set both to current", clicked_fn=self._reset_to_current_all,
+                          style={"font_size": 13})
+            
+            with ui.HStack(height=28, spacing=6):
                 ui.Button("Set left to current", clicked_fn=lambda: self._set_target_to_current("L"),
-                          style={"font_size": 13})
+                          style={"font_size": 12})
                 ui.Button("Set right to current", clicked_fn=lambda: self._set_target_to_current("R"),
-                          style={"font_size": 13})
+                          style={"font_size": 12})
+            
+            with ui.HStack(height=28, spacing=6):
                 ui.Button("Reset Orientation", clicked_fn=self._reset_all_rpy,
-                          style={"font_size": 13})
+                          style={"font_size": 12})
                 ui.Button("Sync UI -> Prim", clicked_fn=self._sync_targets_to_stage,
-                          style={"font_size": 13})
+                          style={"font_size": 12})
                 ui.Spacer()
 
     def _section_header(self, title: str, color=CLR_TEXT):
@@ -494,11 +524,11 @@ class OpenArmAutoController(omni.ext.IExt):
         print("[OpenArmAutoController]", s)
 
     def _apply_mode_ui(self):
-        """Toggle UI sections based on mode"""
+        """Toggle UI visibility based on current mode"""
         is_joint = (self.mode == "JOINT")
         try:
-            self.target_ui_frame.collapsed = is_joint
-            self.joint_ui_frame.collapsed = not is_joint
+            self.mode_joint_container.visible = is_joint
+            self.mode_ik_container.visible = not is_joint
         except Exception:
             pass
 
@@ -947,10 +977,20 @@ class OpenArmAutoController(omni.ext.IExt):
             self._is_syncing = False
 
     def _reset_targets(self):
+        # Reset to initial default positions
+        self._tgtL = {"x": 0.0, "y": 0.1535, "z": 0.0689}
+        self._tgtR = {"x": 0.0, "y": -0.1535, "z": 0.0689}
+        self._rpyL = {"roll": 180.0, "pitch": 0.0, "yaw": 0.0}
+        self._rpyR = {"roll": 180.0, "pitch": 0.0, "yaw": 0.0}
+        
+        self._sync_targets_to_stage()
+        self._set_status("Targets reset to initial positions")
+
+    def _reset_to_current_all(self):
         self._set_target_to_current("L")
         self._set_target_to_current("R")
         self._sync_targets_to_stage()
-        self._set_status("Targets reset to current robot pose")
+        self._set_status("Targets set to current robot pose")
 
     def _set_target_to_current(self, side: str):
         """Set target position/orientation to the robot's current end-effector pose"""
