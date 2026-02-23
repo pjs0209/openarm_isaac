@@ -410,7 +410,7 @@
     <origin rpy="0 0 0" xyz="0.0 -0.0315 0.0955"/>
     <parent link="openarm_right_link4"/>
     <child link="openarm_right_link5"/>
-    <axis xyz="1 0 0"/>
+    <axis xyz="0 0 1"/>
     <limit effort="7" lower="-1.570796" upper="1.570796" velocity="20.943946"/>
   </joint>
   <link name="openarm_right_link6">
