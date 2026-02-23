@@ -92,7 +92,7 @@ GRIPPER_RAW_LIMIT = {
 
 
 # =========================
-# Color Palette
+# 색상 팔레트
 # =========================
 CLR_BG_DARK     = 0xFF1A1A2E
 CLR_BG_CARD     = 0xFF16213E
@@ -133,33 +133,23 @@ def quat_normalize_wxyz(q):
 def rpy_to_quat_wxyz(roll_deg, pitch_deg, yaw_deg):
     """
     Roll(X), Pitch(Y), Yaw(Z) Euler angles (degrees) -> quaternion (w,x,y,z)
-    Rotation order: XYZ extrinsic = ZYX intrinsic
     """
-    r = np.radians(float(roll_deg))
-    p = np.radians(float(pitch_deg))
-    y = np.radians(float(yaw_deg))
-
-    cr, sr = np.cos(r / 2), np.sin(r / 2)
-    cp, sp = np.cos(p / 2), np.sin(p / 2)
-    cy, sy = np.cos(y / 2), np.sin(y / 2)
-
-    # Rotation order: XYZ extrinsic = ZYX intrinsic
-    # Use Isaac Sim core utility instead of custom implementation
     q = euler_angles_to_quat(np.array([roll_deg, pitch_deg, yaw_deg]), degrees=True)
     return q
 
 
 class OpenArmAutoController(omni.ext.IExt):
     """
-    - JOINT mode: slider -> dynamic_control dof position target
-    - LULA_IK mode: target cube position -> ArticulationKinematicsSolver IK -> apply_action
+    OpenArm Controller 클래스:
+    - JOINT 모드: 사용자가 슬라이더로 각 관절을 직접 제어합니다.
+    - LULA_IK 모드: 목표 위치(큐브)를 설정하면 기구학 솔버가 관절각을 계산합니다.
     """
 
     def on_startup(self, ext_id):
         """
         확장 프로그램이 처음 시작(로드)될 때 호출되는 초기화 함수입니다.
         """
-        print("=== 초기화 시작: OpenArm UI 제어패널 ===")
+        print("=== Startup: OpenArm UI Control Panel ===")
 
         # 이전 윈도우가 열려있다면 정리합니다.
         if getattr(self, "window", None) is not None:
@@ -201,7 +191,9 @@ class OpenArmAutoController(omni.ext.IExt):
         # 데이터 저장을 위한 변수들
         self.targets = {} # 조인트별 목표 위치값
         self.slider_by_dof = {} # 화면의 슬라이더 객체 저장
-        self.dof_handle_by_name = {} # 이름으로 물리 조인트 핸들 찾기
+        self.dof_name_by_handle = {} # 핸들에서 이름 찾기
+        self.dof_handle_by_name = {} # 이름에서 핸들 찾기
+        self.dof_index_by_name = {}  # 이름에서 인덱스(0,1,2...) 찾기 [추가]
         self.cur_tgt_labels = {} # 현재/목표 값을 표시하는 텍스트 라벨
 
         self._active_tab = "left" # 현재 보고 있는 탭 (왼쪽/오른쪽)
@@ -221,6 +213,25 @@ class OpenArmAutoController(omni.ext.IExt):
         self._rpyL = {"roll": 180.0, "pitch": 0.0, "yaw": 0.0}
         self._rpyR = {"roll": 180.0, "pitch": 0.0, "yaw": 0.0}
 
+        # 방향성 제어 활성화 여부 플래그
+        self._use_oriL = False
+        self._use_oriR = False
+
+        # UI 슬라이더 참조를 위한 저장소
+        self._tgt_sliders_L = {}
+        self._tgt_sliders_R = {}
+        self._rpy_sliders_L = {}
+        self._rpy_sliders_R = {}
+        self._grip_sliders_IK = {} # IK 모드용 그리퍼 슬라이더 추가 [복구]
+
+        # 데이터 동기화 및 상태 관리 변수들
+        self._is_syncing = False
+        self._last_status = None
+        self._printed_tb = False
+
+        self._last_cube_poseL = None # 큐브 움직임 감지용
+        self._last_cube_poseR = None
+
         # 3. 사용자 인터페이스(UI)를 만듭니다.
         self._build_ui()
 
@@ -228,10 +239,10 @@ class OpenArmAutoController(omni.ext.IExt):
         app = omni.kit.app.get_app()
         self._sub = app.get_update_event_stream().create_subscription_to_pop(self._on_update)
 
-        self._set_status("시뮬레이션 재생(Play) 버튼을 눌러주세요.")
+        self._set_status("Press Play to start")
 
     # =========================
-    # USD Load
+    # USD 파일 자동 로드
     # =========================
     def _auto_open_stage(self, ext_id: str):
         ext_mgr = omni.kit.app.get_app().get_extension_manager()
@@ -244,7 +255,7 @@ class OpenArmAutoController(omni.ext.IExt):
 
         ctx = omni.usd.get_context()
 
-        # Skip if same file already open
+        # 이미 해당 파일이 열려있으면 중복 로드 방지
         try:
             cur_url = ctx.get_stage_url()
             if cur_url and cur_url.endswith("openarm_sim.usd"):
@@ -261,9 +272,6 @@ class OpenArmAutoController(omni.ext.IExt):
         self.articulation = None
         self._articulation_ready = False
 
-    # =========================
-    # UI Style
-    # =========================
     def _style(self):
         return {
             "title":      {"font_size": 22, "color": CLR_TEXT},
@@ -279,7 +287,7 @@ class OpenArmAutoController(omni.ext.IExt):
         }
 
     # =========================
-    # UI Build
+    # UI 생성
     # =========================
     def _build_ui(self):
         st = self._style()
@@ -294,7 +302,7 @@ class OpenArmAutoController(omni.ext.IExt):
         with self.window.frame:
             with ui.VStack(spacing=6):
 
-                # -- Header --
+                # -- 상단 헤더 영역 --
                 with ui.ZStack(height=60):
                     ui.Rectangle(style={"background_color": CLR_ACCENT, "border_radius": 8})
                     with ui.VStack(spacing=2):
@@ -308,28 +316,28 @@ class OpenArmAutoController(omni.ext.IExt):
 
                 ui.Spacer(height=2)
 
-                # -- Control Bar --
+                # -- 조작 버튼 바 --
                 with ui.HStack(height=32, spacing=6):
                     ui.Button("Zero", width=70, clicked_fn=self._on_zero_position,
-                              style={"font_size": 13})
+                               style={"font_size": 13})
                     self.mode_btn = ui.Button("Mode: JOINT", clicked_fn=self._toggle_mode,
                                               style={"font_size": 13, "color": CLR_SUCCESS})
                     ui.Spacer()
                     self.tab_left_btn = ui.Button("Left", width=65, clicked_fn=lambda: self._show_tab("left"),
-                                                  style={"font_size": 13, "color": CLR_LEFT})
+                                                   style={"font_size": 13, "color": CLR_LEFT})
                     self.tab_right_btn = ui.Button("Right", width=65, clicked_fn=lambda: self._show_tab("right"),
-                                                   style={"font_size": 13, "color": CLR_RIGHT})
+                                                    style={"font_size": 13, "color": CLR_RIGHT})
 
-                # -- Mode Content Area (Window Swap) --
+                # -- 메인 콘텐츠 영역 --
                 with ui.ZStack():
-                    # Container for LULA_IK mode
+                    # LULA_IK 모드 화면
                     self.mode_ik_container = ui.VStack(visible=False, spacing=6)
                     with self.mode_ik_container:
                         with ui.ScrollingFrame(height=800):
                             with ui.VStack(spacing=8):
                                 self._build_target_ui()
                     
-                    # Container for JOINT mode
+                    # JOINT 모드 화면
                     self.mode_joint_container = ui.VStack(visible=True, spacing=6)
                     with self.mode_joint_container:
                         with ui.ScrollingFrame(height=800):
@@ -354,18 +362,16 @@ class OpenArmAutoController(omni.ext.IExt):
         with ui.VStack(spacing=15):
             ui.Label("In LULA_IK mode, arms follow target position and orientation.", style=st["muted"], height=20)
 
-            # --- Left Target Card ---
-            with ui.ZStack(height=240):
+            # --- 왼쪽 목표 지점 카드 ---
+            with ui.ZStack(height=270):
                 ui.Rectangle(style={"background_color": 0x40151515, "border_radius": 10})
                 with ui.VStack(spacing=2):
                     ui.Spacer(height=10)
-                    # Title Row
                     with ui.HStack(height=24):
                         ui.Spacer(width=15)
                         ui.Label("Left Arm Target", style={"font_size": 15, "color": CLR_LEFT})
                         ui.Spacer(width=15)
                     
-                    # Position Header & Checkbox
                     with ui.HStack(height=24):
                         ui.Spacer(width=15)
                         ui.Label("Position Targets", style=st["muted"], width=120)
@@ -376,7 +382,6 @@ class OpenArmAutoController(omni.ext.IExt):
                         self._cb_oriL.model.add_value_changed_fn(lambda m: self._on_toggle_ori("L", m.get_value_as_bool()))
                         ui.Spacer(width=15)
 
-                    # Position Sliders
                     with ui.HStack(height=72): # 3 * 24
                         ui.Spacer(width=15)
                         with ui.VStack(spacing=0):
@@ -387,34 +392,38 @@ class OpenArmAutoController(omni.ext.IExt):
 
                     ui.Spacer(height=6)
 
-                    # Orientation Header
                     with ui.HStack(height=20):
                         ui.Spacer(width=15)
                         ui.Label("Orientation (RPY Degrees)", style=st["muted"])
                         ui.Spacer(width=15)
 
-                    # Orientation Sliders
-                    with ui.HStack(height=72): # 3 * 24
+                    with ui.HStack(height=72):
                         ui.Spacer(width=15)
                         with ui.VStack(spacing=0):
                             self._rpy_sliders_L["roll"] = slider_row("R", -180.0, 180.0, self._rpyL["roll"], lambda v: self._on_target_rpy_slider("L", "roll", v), CLR_LEFT)
                             self._rpy_sliders_L["pitch"] = slider_row("P", -90.0, 90.0, self._rpyL["pitch"], lambda v: self._on_target_rpy_slider("L", "pitch", v), CLR_LEFT)
                             self._rpy_sliders_L["yaw"] = slider_row("Y", -180.0, 180.0, self._rpyL["yaw"], lambda v: self._on_target_rpy_slider("L", "yaw", v), CLR_LEFT)
                         ui.Spacer(width=15)
+
+                    # [추가] IK 모드에서도 그리퍼 슬라이더를 표시합니다. (이름 기반으로 상시 생성)
+                    with ui.HStack(height=24):
+                        ui.Spacer(width=15)
+                        left_grip_name = "openarm_left_finger_joint1"
+                        self._grip_sliders_IK["L"] = slider_row("G", 0.0, 0.04, 0.0, 
+                            lambda v: self._on_joint_slider(left_grip_name, v), CLR_SUCCESS)
+                        ui.Spacer(width=15)
                     ui.Spacer()
 
-            # --- Right Target Card ---
-            with ui.ZStack(height=240):
+            # --- 오른쪽 목표 지점 카드 ---
+            with ui.ZStack(height=270):
                 ui.Rectangle(style={"background_color": 0x40151515, "border_radius": 10})
                 with ui.VStack(spacing=2):
                     ui.Spacer(height=10)
-                    # Title Row
                     with ui.HStack(height=24):
                         ui.Spacer(width=15)
                         ui.Label("Right Arm Target", style={"font_size": 15, "color": CLR_RIGHT})
                         ui.Spacer(width=15)
                     
-                    # Position Header & Checkbox
                     with ui.HStack(height=24):
                         ui.Spacer(width=15)
                         ui.Label("Position Targets", style=st["muted"], width=120)
@@ -425,7 +434,6 @@ class OpenArmAutoController(omni.ext.IExt):
                         self._cb_oriR.model.add_value_changed_fn(lambda m: self._on_toggle_ori("R", m.get_value_as_bool()))
                         ui.Spacer(width=15)
 
-                    # Position Sliders
                     with ui.HStack(height=72):
                         ui.Spacer(width=15)
                         with ui.VStack(spacing=0):
@@ -436,13 +444,11 @@ class OpenArmAutoController(omni.ext.IExt):
 
                     ui.Spacer(height=6)
 
-                    # Orientation Header
                     with ui.HStack(height=20):
                         ui.Spacer(width=15)
                         ui.Label("Orientation (RPY Degrees)", style=st["muted"])
                         ui.Spacer(width=15)
 
-                    # Orientation Sliders
                     with ui.HStack(height=72):
                         ui.Spacer(width=15)
                         with ui.VStack(spacing=0):
@@ -450,27 +456,35 @@ class OpenArmAutoController(omni.ext.IExt):
                             self._rpy_sliders_R["pitch"] = slider_row("P", -90.0, 90.0, self._rpyR["pitch"], lambda v: self._on_target_rpy_slider("R", "pitch", v), CLR_RIGHT)
                             self._rpy_sliders_R["yaw"] = slider_row("Y", -180.0, 180.0, self._rpyR["yaw"], lambda v: self._on_target_rpy_slider("R", "yaw", v), CLR_RIGHT)
                         ui.Spacer(width=15)
+                    
+                    # [추가] IK 모드에서도 그리퍼 슬라이더를 표시합니다. (이름 기반으로 상시 생성)
+                    with ui.HStack(height=24):
+                        ui.Spacer(width=15)
+                        right_grip_name = "openarm_right_finger_joint1"
+                        self._grip_sliders_IK["R"] = slider_row("G", 0.0, 0.04, 0.0, 
+                            lambda v: self._on_joint_slider(right_grip_name, v), CLR_SUCCESS)
+                        ui.Spacer(width=15)
                     ui.Spacer()
 
             ui.Spacer(height=5)
 
             with ui.HStack(height=28, spacing=6):
                 ui.Button("Reset Targets", clicked_fn=self._reset_targets,
-                          style={"font_size": 13})
+                           style={"font_size": 13})
                 ui.Button("Set both to current", clicked_fn=self._reset_to_current_all,
-                          style={"font_size": 13})
+                           style={"font_size": 13})
             
             with ui.HStack(height=28, spacing=6):
                 ui.Button("Set left to current", clicked_fn=lambda: self._set_target_to_current("L"),
-                          style={"font_size": 12})
+                           style={"font_size": 12})
                 ui.Button("Set right to current", clicked_fn=lambda: self._set_target_to_current("R"),
-                          style={"font_size": 12})
+                           style={"font_size": 12})
             
             with ui.HStack(height=28, spacing=6):
                 ui.Button("Reset Orientation", clicked_fn=self._reset_all_rpy,
-                          style={"font_size": 12})
+                           style={"font_size": 12})
                 ui.Button("Sync UI -> Prim", clicked_fn=self._sync_targets_to_stage,
-                          style={"font_size": 12})
+                           style={"font_size": 12})
                 ui.Spacer()
 
     def _section_header(self, title: str, color=CLR_TEXT):
@@ -490,7 +504,6 @@ class OpenArmAutoController(omni.ext.IExt):
         except Exception:
             pass
 
-        # Tab button highlight
         try:
             if name == "left":
                 self.tab_left_btn.style = {"font_size": 13, "color": CLR_LEFT}
@@ -510,7 +523,6 @@ class OpenArmAutoController(omni.ext.IExt):
         print("[OpenArmAutoController]", s)
 
     def _apply_mode_ui(self):
-        """Toggle UI visibility based on current mode"""
         is_joint = (self.mode == "JOINT")
         try:
             self.mode_joint_container.visible = is_joint
@@ -518,7 +530,6 @@ class OpenArmAutoController(omni.ext.IExt):
         except Exception:
             pass
 
-        # Mode button color
         try:
             if is_joint:
                 self.mode_btn.text = "Mode: JOINT"
@@ -529,20 +540,64 @@ class OpenArmAutoController(omni.ext.IExt):
         except Exception:
             pass
 
-    # ---------------- Mode ----------------
     def _toggle_mode(self):
+        # 모드 전환
         self.mode = "LULA_IK" if self.mode == "JOINT" else "JOINT"
-
         self._apply_mode_ui()
 
         stage = omni.usd.get_context().get_stage()
         if stage is not None:
+            # 1. 시뮬레이션 물리 모델과 동기화하기 위한 핸들 등이 필요할 수 있으므로 강제 확인
             self._ensure_target_prims(stage)
+
+            # 2. 전환되는 모드에 따라 상태를 동기화합니다.
+            if self.mode == "JOINT":
+                # LULA_IK -> JOINT: 현재 로봇의 실제 관절각을 읽어와서 슬라이더와 목표값에 적용합니다.
+                if self._bound:
+                    self._is_syncing = True # 슬라이더 변경 시 발생할 수 있는 콜백 재입력 방지
+                    try:
+                        for dof, slider in self.slider_by_dof.items():
+                            name = self.dof_name_by_handle.get(dof, "")
+                            grip = (USE_GRIPPER_RAW and is_gripper(name))
+                            cur_pos = float(self.dc.get_dof_position(dof))
+                            
+                            # UI 값으로 변환 (deg/rad/raw)
+                            val_ui = cur_pos if grip else math.degrees(cur_pos)
+                            
+                            # 슬라이더 모델 업데이트
+                            slider.model.set_value(val_ui)
+                            # 내부 타겟 변수 업데이트
+                            self.targets[dof] = cur_pos
+                    finally:
+                        self._is_syncing = False
+                self._set_status("Switched to JOINT: Synced sliders to current robot state.")
+
+            elif self.mode == "LULA_IK":
+                # JOINT -> LULA_IK: 현재 로봇의 끝단(EE) 위치로 목표 큐브들을 이동시키고, 그리퍼 슬라이더를 동기화합니다.
+                if self._lula_ready:
+                    self._set_target_to_current("L")
+                    self._set_target_to_current("R")
+                
+                # IK 모드의 전용 그리퍼 슬라이더(G) 동기화
+                self._is_syncing = True
+                try:
+                    for side, slider in self._grip_sliders_IK.items():
+                        name = "openarm_left_finger_joint1" if side == "L" else "openarm_right_finger_joint1"
+                        handle = self.dof_handle_by_name.get(name)
+                        if handle is not None:
+                            cur_pos = self.targets.get(handle, 0.0)
+                            slider.model.set_value(float(cur_pos))
+                finally:
+                    self._is_syncing = False
+
+                self._set_status("Switched to LULA_IK: Synced targets and grippers.")
+
+            # 3. 변경 사항을 3D 화면에 즉시 반영
             self._sync_targets_to_stage()
 
-        self._set_status(f"Mode: {self.mode}")
+        print(f"[OpenArmAutoController] Mode toggled to: {self.mode}")
 
-    # ---------------- Update / Binding ----------------
+    # ---------------- Update 루프 ----------------
     def _on_update(self, e):
         """
         시뮬레이션이 돌아가는 동안 매 순간(프레임) 실행되는 메인 루프입니다.
@@ -558,15 +613,17 @@ class OpenArmAutoController(omni.ext.IExt):
             self.articulation = None
             self.artik_left = None
             self.artik_right = None
-            self._set_status("시뮬레이션 중지. 재생 버튼을 누르면 다시 연결됩니다.")
+            self._set_status("Simulation stopped. Ready to re-bind.")
 
         # 로봇과 성공적으로 연결된 상태라면 (시뮬레이션 실행 중)
         if self._bound:
             stage = omni.usd.get_context().get_stage()
             if stage is not None:
-                # 3D 화면의 목표 좌표계(Cube)를 UI 값과 동기화합니다.
+                # 3D 화면 요소(큐브 등)가 없으면 생성합니다.
                 self._ensure_target_prims(stage)
-                self._sync_targets_to_stage()
+                
+                # [중요] 3D 화면에서 직접 큐브를 움직였는지 확인하고 UI를 갱신합니다.
+                self._sync_ui_from_viewport(stage)
 
             # IK(기구학) 모드인 경우: 목표 큐브를 향해 로봇이 움직이도록 계산하여 명령을 내립니다.
             if self.mode == "LULA_IK" and self._lula_ready and self._articulation_ready:
@@ -575,7 +632,7 @@ class OpenArmAutoController(omni.ext.IExt):
                 except Exception:
                     if not self._printed_tb:
                         self._printed_tb = True
-                        print("=== IK 연산 오류 발생 ===")
+                        print("=== IK Status Error ===")
                         print(traceback.format_exc())
 
             # 직접 운전(JOINT) 모드인 경우: 슬라이더 값을 물리 엔진에 직접 전달합니다.
@@ -598,13 +655,13 @@ class OpenArmAutoController(omni.ext.IExt):
 
         # 시뮬레이션이 아직 시작되지 않았다면 대기 메시지를 표시합니다.
         if not is_playing:
-            self._set_status("재생 버튼(Play)을 눌러 하드웨어를 활성화하세요.")
+            self._set_status("Press Play to activate hardware.")
             return
 
         # 재생 버튼을 눌렀다면, 실제 로봇(Articulation)을 찾아 연결을 시도합니다.
         stage = omni.usd.get_context().get_stage()
         if stage is None:
-            self._set_status("화면 데이터(Stage)가 준비되지 않았습니다.")
+            self._set_status("Stage not ready...")
             return
 
         # 1) 로봇 물체를 물리 엔진 핸들로 가져옵니다.
@@ -616,7 +673,7 @@ class OpenArmAutoController(omni.ext.IExt):
                 art = found_art
 
         if art == 0:
-            self._set_status("로봇 물체를 찾는 중...")
+            self._set_status("Searching articulation...")
             return
 
         # 2) 찾은 로봇을 조작 준비(Bind) 상태로 만듭니다.
@@ -626,125 +683,82 @@ class OpenArmAutoController(omni.ext.IExt):
         self._init_single_articulation(stage)
         self._init_lula_and_artik()
         self._ensure_target_prims(stage)
+        # 처음 한 번만 UI 값을 화면에 반영합니다.
         self._sync_targets_to_stage()
 
     def _probe_articulation_under(self, stage, base_path: str):
         base = stage.GetPrimAtPath(base_path)
         if not base or not base.IsValid():
             return None, 0
-
         stack = [base]
         while stack:
             p = stack.pop()
             p_str = str(p.GetPath())
-
-            if p_str.startswith("/World/Targets"):
-                continue
-
-            low = p_str.lower()
-            if "constraint" in low or "actiongraph" in low:
-                continue
-
+            if p_str.startswith("/World/Targets"): continue
+            if "constraint" in p_str.lower() or "actiongraph" in p_str.lower(): continue
             try:
                 art = self.dc.get_articulation(p_str)
             except Exception:
                 art = 0
-
-            if art != 0:
-                return p_str, art
-
-            for c in p.GetChildren():
-                stack.append(c)
-
+            if art != 0: return p_str, art
+            for c in p.GetChildren(): stack.append(c)
         return None, 0
 
     def _bind(self, art_handle: int, root_path: str):
         self.art = art_handle
         self._bound = True
-
         self.targets.clear()
         self.slider_by_dof.clear()
         self.dof_name_by_handle.clear()
         self.cur_tgt_labels.clear()
-
         self._set_status(f"Bound: {root_path}")
         self._build_sliders()
         self._show_tab(self._active_tab)
-
         self.dof_handle_by_name = {name: dof for dof, name in self.dof_name_by_handle.items()}
 
-    # ---------------- SingleArticulation ----------------
     def _init_single_articulation(self, stage):
-        if self._articulation_ready and self.articulation is not None:
-            return
-
+        if self._articulation_ready and self.articulation is not None: return
         candidates = [
-            self.robot_root_prim,
+            self.robot_root_prim, 
             f"{self.robot_root_prim}/root_joint",
             f"{self.robot_root_prim}/openarm_left_ee_tcp",
             f"{self.robot_root_prim}/openarm_right_ee_tcp",
         ]
-
         for prim_path in candidates:
             prim = stage.GetPrimAtPath(prim_path)
-            if not prim or not prim.IsValid():
-                continue
-
+            if not prim or not prim.IsValid(): continue
             try:
                 art = SingleArticulation(prim_path)
-                if not art.handles_initialized:
-                    art.initialize()
-
+                if not art.handles_initialized: art.initialize()
                 self.articulation = art
                 self._articulation_ready = True
-                self._set_status(f"Articulation ready: {prim_path}")
+                
+                # DOF 이름과 인덱스 매핑 저장
+                self.dof_index_by_name = {name: i for i, name in enumerate(art.dof_names)}
                 return
-            except Exception:
-                continue
+            except Exception: continue
 
-        self._set_status("SingleArticulation init failed")
-
-    # ---------------- Lula + ArticulationKinematicsSolver ----------------
     def _init_lula_and_artik(self):
-        if self._lula_ready or self._lula_failed:
-            return
-
-        if not self._articulation_ready or self.articulation is None:
-            return
-
+        if self._lula_ready or self._lula_failed: return
+        if not self._articulation_ready or self.articulation is None: return
         ext_mgr = omni.kit.app.get_app().get_extension_manager()
         ext_root = ext_mgr.get_extension_path(self._ext_id)
         assets = os.path.join(ext_root, "openarm_UI", "assets")
-
         urdf_path = os.path.join(assets, "openarm_bimanual.urdf")
         left_yaml = os.path.join(assets, "openarm_left.yaml")
         right_yaml = os.path.join(assets, "openarm_right.yaml")
-
-        for p in [urdf_path, left_yaml, right_yaml]:
-            if not os.path.exists(p):
-                self._lula_failed = True
-                self._set_status(f"Lula file missing: {p}")
-                return
-
         try:
             self.lula_left = LulaKinematicsSolver(left_yaml, urdf_path)
             self.lula_right = LulaKinematicsSolver(right_yaml, urdf_path)
-
             self.artik_left = ArticulationKinematicsSolver(self.articulation, self.lula_left, self.ee_left)
             self.artik_right = ArticulationKinematicsSolver(self.articulation, self.lula_right, self.ee_right)
-
             self._lula_ready = True
-            self._set_status("Lula IK ready")
-            
-            # Auto-initialize targets to current EE pose
-            self._set_target_to_current("L")
-            self._set_target_to_current("R")
+            self._set_target_to_current("L"); self._set_target_to_current("R")
         except Exception as e:
             self._lula_failed = True
-            self._set_status(f"Lula/ArtIK init failed: {e}")
-            print("[OpenArmAutoController] Lula/ArtIK init failed:\n", traceback.format_exc())
+            self._set_status(f"IK Init Failed: {e}")
 
-    # ---------------- Target prim (Cube) ----------------
+    # ---------------- Target Prim (3D Cube) ----------------
     def _ensure_target_prims(self, stage):
         targets_root = "/World/Targets"
         if not stage.GetPrimAtPath(targets_root).IsValid():
@@ -754,327 +768,198 @@ class OpenArmAutoController(omni.ext.IExt):
             prim = stage.GetPrimAtPath(path_xform)
             if not prim or not prim.IsValid():
                 prim = stage.DefinePrim(path_xform, "Xform")
-
             xf = UsdGeom.Xformable(prim)
-
-            # Translate op
             t_op = None
             for op in xf.GetOrderedXformOps():
-                if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
-                    t_op = op
-                    break
-            if t_op is None:
-                t_op = xf.AddTranslateOp()
-            if not t_op.GetAttr().HasAuthoredValueOpinion():
-                t_op.Set(default_translate)
-
-            # Orient op
+                if op.GetOpType() == UsdGeom.XformOp.TypeTranslate: t_op = op; break
+            if t_op is None: t_op = xf.AddTranslateOp()
+            if not t_op.GetAttr().HasAuthoredValueOpinion(): t_op.Set(default_translate)
             o_op = None
             for op in xf.GetOrderedXformOps():
-                if op.GetOpType() == UsdGeom.XformOp.TypeOrient:
-                    o_op = op
-                    break
-            if o_op is None:
-                o_op = xf.AddOrientOp()
+                if op.GetOpType() == UsdGeom.XformOp.TypeOrient: o_op = op; break
+            if o_op is None: o_op = xf.AddOrientOp()
             w, x, y, z = default_quat_wxyz
             q = Gf.Quatf(float(w), Gf.Vec3f(float(x), float(y), float(z)))
-            if not o_op.GetAttr().HasAuthoredValueOpinion():
-                o_op.Set(q)
+            if not o_op.GetAttr().HasAuthoredValueOpinion(): o_op.Set(q)
 
-            # Cube visual
-            vis_path = f"{path_xform}/vis"
-            vis_prim = stage.GetPrimAtPath(vis_path)
-            if not vis_prim or not vis_prim.IsValid():
-                vis_prim = stage.DefinePrim(vis_path, "Cube")
-                cube = UsdGeom.Cube(vis_prim)
-                cube.CreateSizeAttr(0.04)
-                
-            # Axis markers (X:Red, Y:Green, Z:Blue)
-            def ensure_axis(axis_name, color, rotation_quat=None):
-                axis_path = f"{path_xform}/{axis_name}"
-                prim = stage.GetPrimAtPath(axis_path)
-                if not prim or not prim.IsValid():
-                    prim = stage.DefinePrim(axis_path, "Cylinder")
-                    cyl = UsdGeom.Cylinder(prim)
-                    cyl.CreateRadiusAttr(0.002)
-                    cyl.CreateHeightAttr(0.12)
-                    cyl.CreateDisplayColorAttr([color])
-                    xf = UsdGeom.Xformable(prim)
-                    # Position at the end of the cylinder to point outwards
-                    t_op = xf.AddTranslateOp()
-                    if axis_name == "X":
-                        t_op.Set(Gf.Vec3d(0.06, 0, 0))
-                        r_op = xf.AddRotateYOp()
-                        r_op.Set(90)
-                    elif axis_name == "Y":
-                        t_op.Set(Gf.Vec3d(0, 0.06, 0))
-                        r_op = xf.AddRotateXOp()
-                        r_op.Set(-90)
-                    elif axis_name == "Z":
-                        t_op.Set(Gf.Vec3d(0, 0, 0.06))
-
-            ensure_axis("X", (1, 0, 0))
-            ensure_axis("Y", (0, 1, 0))
-            ensure_axis("Z", (0, 0, 1))
-
-        qL = rpy_to_quat_wxyz(self._rpyL["roll"], self._rpyL["pitch"], self._rpyL["yaw"])
-        qR = rpy_to_quat_wxyz(self._rpyR["roll"], self._rpyR["pitch"], self._rpyR["yaw"])
-        ensure_target(self.left_target_prim,
-                      Gf.Vec3d(self._tgtL["x"], self._tgtL["y"], self._tgtL["z"]),
-                      (float(qL[0]), float(qL[1]), float(qL[2]), float(qL[3])))
-        ensure_target(self.right_target_prim,
-                      Gf.Vec3d(self._tgtR["x"], self._tgtR["y"], self._tgtR["z"]),
-                      (float(qR[0]), float(qR[1]), float(qR[2]), float(qR[3])))
-
-    def _get_or_create_translate_op(self, stage, prim_path: str):
-        prim = stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid():
-            return None
-        x = UsdGeom.Xformable(prim)
-        for op in x.GetOrderedXformOps():
-            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
-                return op
-        return x.AddTranslateOp()
+        q_def = rpy_to_quat_wxyz(180, 0, 0)
+        ensure_target(self.left_target_prim, Gf.Vec3d(self._tgtL["x"], self._tgtL["y"], self._tgtL["z"]), q_def)
+        ensure_target(self.right_target_prim, Gf.Vec3d(self._tgtR["x"], self._tgtR["y"], self._tgtR["z"]), q_def)
 
     def _set_target_translation(self, stage, prim_path: str, xyz):
-        op = self._get_or_create_translate_op(stage, prim_path)
-        if op is None:
-            return
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid(): return
+        xf = UsdGeom.Xformable(prim)
+        op = None
+        for xop in xf.GetOrderedXformOps():
+            if xop.GetOpType() == UsdGeom.XformOp.TypeTranslate: op = xop; break
+        if op is None: op = xf.AddTranslateOp()
         op.Set(Gf.Vec3d(float(xyz[0]), float(xyz[1]), float(xyz[2])))
 
-    def _get_or_create_orient_op(self, stage, prim_path: str):
-        prim = stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid():
-            return None
-        xf = UsdGeom.Xformable(prim)
-        for op in xf.GetOrderedXformOps():
-            if op.GetOpType() == UsdGeom.XformOp.TypeOrient:
-                return op
-        return xf.AddOrientOp()
-
     def _set_target_orientation_wxyz(self, stage, prim_path: str, quat_wxyz):
-        op = self._get_or_create_orient_op(stage, prim_path)
-        if op is None:
-            return
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid(): return
+        xf = UsdGeom.Xformable(prim)
+        op = None
+        for xop in xf.GetOrderedXformOps():
+            if xop.GetOpType() == UsdGeom.XformOp.TypeOrient: op = xop; break
+        if op is None: op = xf.AddOrientOp()
         w, x, y, z = quat_wxyz
-        q = Gf.Quatf(float(w), Gf.Vec3f(float(x), float(y), float(z)))
-        op.Set(q)
+        op.Set(Gf.Quatf(float(w), Gf.Vec3f(float(x), float(y), float(z))))
 
     def _get_world_translation(self, stage, prim_path: str):
         prim = stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid():
-            return None
+        if not prim or not prim.IsValid(): return None
         xf = UsdGeom.Xformable(prim)
         M = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         t = M.ExtractTranslation()
-        return (float(t[0]), float(t[1]), float(t[2]))
+        return (t[0], t[1], t[2])
 
     def _get_world_quat_wxyz(self, stage, prim_path: str):
         prim = stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid():
-            return None
+        if not prim or not prim.IsValid(): return None
         xf = UsdGeom.Xformable(prim)
         M = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         r = M.ExtractRotationQuat()
-        w = float(r.GetReal())
-        im = r.GetImaginary()
-        return (w, float(im[0]), float(im[1]), float(im[2]))
+        return (r.GetReal(), r.GetImaginary()[0], r.GetImaginary()[1], r.GetImaginary()[2])
 
+    # ---------------- UI Events ----------------
     def _on_target_slider(self, side: str, axis: str, value: float):
-        if self._is_syncing:
-            return
-        if side == "L":
-            self._tgtL[axis] = float(value)
-        else:
-            self._tgtR[axis] = float(value)
-
-        stage = omni.usd.get_context().get_stage()
-        if stage is not None:
-            self._ensure_target_prims(stage)
-            self._sync_targets_to_stage()
+        if self._is_syncing: return
+        if side == "L": self._tgtL[axis] = float(value)
+        else: self._tgtR[axis] = float(value)
+        self._sync_targets_to_stage()
 
     def _on_target_rpy_slider(self, side: str, axis: str, value: float):
-        if self._is_syncing:
-            return
-        if side == "L":
-            self._rpyL[axis] = float(value)
-        else:
-            self._rpyR[axis] = float(value)
-
-        stage = omni.usd.get_context().get_stage()
-        if stage is not None:
-            self._ensure_target_prims(stage)
-            self._sync_targets_to_stage()
+        if self._is_syncing: return
+        if side == "L": self._rpyL[axis] = float(value)
+        else: self._rpyR[axis] = float(value)
+        self._sync_targets_to_stage()
 
     def _on_toggle_ori(self, side: str, value: bool):
-        if side == "L":
-            self._use_oriL = value
-        else:
-            self._use_oriR = value
-        self._set_status(f"{side} orientation constraint: {value}")
+        if side == "L": self._use_oriL = value
+        else: self._use_oriR = value
 
-    def _reset_rpy(self, side: str):
-        if side == "L":
-            self._rpyL = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}
-        else:
-            self._rpyR = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}
-        self._sync_targets_to_stage()
-        self._set_status(f"{side} orientation reset")
+    def _sync_ui_from_viewport(self, stage):
+        """3D 화면에서 큐브를 직접 움직였을 경우 UI 값을 그에 맞게 업데이트합니다."""
+        if self._is_syncing: return
 
-    def _reset_all_rpy(self):
-        self._rpyL = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}
-        self._rpyR = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}
-        stage = omni.usd.get_context().get_stage()
-        if stage is not None:
-            self._ensure_target_prims(stage)
-            self._sync_targets_to_stage()
-        self._set_status("All orientations reset")
+        def check_and_sync(side: str, prim_path: str):
+            pos = self._get_world_translation(stage, prim_path)
+            quat = self._get_world_quat_wxyz(stage, prim_path)
+            if pos is None or quat is None: return
+
+            # 마지막 저장된 위치와 비교하여 변화가 있는지 확인
+            last = self._last_cube_poseL if side == "L" else self._last_cube_poseR
+            curr = (pos, quat)
+            
+            if last is not None:
+                # 위치나 회전이 미세하게라도 변했는지 확인
+                if np.allclose(last[0], curr[0], atol=1e-4) and np.allclose(last[1], curr[1], atol=1e-4):
+                    return
+
+            # 변화가 감지됨 -> UI 내부 값 업데이트
+            if side == "L":
+                self._tgtL = {"x": pos[0], "y": pos[1], "z": pos[2]}
+                r, p, y = matrix_to_euler_angles(Gf.Matrix3d(Gf.Quatd(*quat)), degrees=True)
+                self._rpyL = {"roll": r, "pitch": p, "yaw": y}
+                self._last_cube_poseL = curr
+            else:
+                self._tgtR = {"x": pos[0], "y": pos[1], "z": pos[2]}
+                r, p, y = matrix_to_euler_angles(Gf.Matrix3d(Gf.Quatd(*quat)), degrees=True)
+                self._rpyR = {"roll": r, "pitch": p, "yaw": y}
+                self._last_cube_poseR = curr
+
+            # 실제 슬라이더 UI 갱신 (콜백 재호출 방지를 위해 루프 밖에서 처리)
+            self._sync_ui_from_state()
+
+        check_and_sync("L", self.left_target_prim)
+        check_and_sync("R", self.right_target_prim)
 
     def _sync_targets_to_stage(self):
         stage = omni.usd.get_context().get_stage()
-        if stage is None:
-            return
+        if stage is None: return
         self._ensure_target_prims(stage)
         self._set_target_translation(stage, self.left_target_prim, (self._tgtL["x"], self._tgtL["y"], self._tgtL["z"]))
         self._set_target_translation(stage, self.right_target_prim, (self._tgtR["x"], self._tgtR["y"], self._tgtR["z"]))
-
         qL = rpy_to_quat_wxyz(self._rpyL["roll"], self._rpyL["pitch"], self._rpyL["yaw"])
         qR = rpy_to_quat_wxyz(self._rpyR["roll"], self._rpyR["pitch"], self._rpyR["yaw"])
         self._set_target_orientation_wxyz(stage, self.left_target_prim, qL)
         self._set_target_orientation_wxyz(stage, self.right_target_prim, qR)
         
-        # Also sync UI sliders
+        # 마지막 위치 저장 (강제 동기화 후)
+        self._last_cube_poseL = (self._get_world_translation(stage, self.left_target_prim), self._get_world_quat_wxyz(stage, self.left_target_prim))
+        self._last_cube_poseR = (self._get_world_translation(stage, self.right_target_prim), self._get_world_quat_wxyz(stage, self.right_target_prim))
+        
         self._sync_ui_from_state()
 
     def _sync_ui_from_state(self):
-        """Force UI sliders to match internal _tgt and _rpy state"""
-        if self._is_syncing:
-            return
+        if self._is_syncing: return
         self._is_syncing = True
         try:
-            # Left
             for k in ["x", "y", "z"]:
                 if k in self._tgt_sliders_L: self._tgt_sliders_L[k].model.set_value(self._tgtL[k])
-            for k in ["roll", "pitch", "yaw"]:
-                if k in self._rpy_sliders_L: self._rpy_sliders_L[k].model.set_value(self._rpyL[k])
-            # Right
-            for k in ["x", "y", "z"]:
                 if k in self._tgt_sliders_R: self._tgt_sliders_R[k].model.set_value(self._tgtR[k])
             for k in ["roll", "pitch", "yaw"]:
+                if k in self._rpy_sliders_L: self._rpy_sliders_L[k].model.set_value(self._rpyL[k])
                 if k in self._rpy_sliders_R: self._rpy_sliders_R[k].model.set_value(self._rpyR[k])
-        finally:
-            self._is_syncing = False
+        finally: self._is_syncing = False
 
     def _reset_targets(self):
-        # Reset to initial default positions
-        self._tgtL = {"x": 0.0, "y": 0.1535, "z": 0.0689}
-        self._tgtR = {"x": 0.0, "y": -0.1535, "z": 0.0689}
+        self._tgtL = {"x": 0.0, "y": 0.1535, "z": 0.0820}
+        self._tgtR = {"x": 0.0, "y": -0.1535, "z": 0.0820}
         self._rpyL = {"roll": 180.0, "pitch": 0.0, "yaw": 0.0}
         self._rpyR = {"roll": 180.0, "pitch": 0.0, "yaw": 0.0}
-        
         self._sync_targets_to_stage()
-        self._set_status("Targets reset to initial positions")
 
     def _reset_to_current_all(self):
-        self._set_target_to_current("L")
-        self._set_target_to_current("R")
-        self._sync_targets_to_stage()
-        self._set_status("Targets set to current robot pose")
+        self._set_target_to_current("L"); self._set_target_to_current("R")
 
     def _set_target_to_current(self, side: str):
-        """Set target position/orientation to the robot's current end-effector pose"""
-        if self.articulation is None or not self.articulation.handles_initialized:
-            return
-        if self.articulation.get_joint_positions() is None:
-            return
-        
+        if self.articulation is None or self.artik_left is None: return
         ik_solver = self.artik_left if side == "L" else self.artik_right
-        if ik_solver is None:
-            return
-            
         try:
-            # Get current EE pose (position, 3x3 rotation matrix)
             pos, rot_mat = ik_solver.compute_end_effector_pose()
-            
-            # Convert rot_mat to Euler angles in degrees (extrinsic XYZ)
             euler = matrix_to_euler_angles(rot_mat, degrees=True)
-            
-            # Euler normalization: if roll is ~180, it might be an inverted solution.
-            # We can try to normalize it to [0, 180] or similar if needed, 
-            # but for now let's just ensure it's precisely handled.
-            r, p, y = float(euler[0]), float(euler[1]), float(euler[2])
-            
-            # Simple heuristic: if |roll| > 170 and |pitch| < 10, it's often a flipped representation of (0, 0, 180) or similar.
-            # But the most robust way is to just use what Isaac Sim gives us and SYNC the UI.
-            
             if side == "L":
                 self._tgtL = {"x": float(pos[0]), "y": float(pos[1]), "z": float(pos[2])}
-                self._rpyL = {"roll": r, "pitch": p, "yaw": y}
-                # Sync sliders
-                for k in ["x", "y", "z"]:
-                    if k in self._tgt_sliders_L: self._tgt_sliders_L[k].model.set_value(self._tgtL[k])
-                for k in ["roll", "pitch", "yaw"]:
-                    if k in self._rpy_sliders_L: self._rpy_sliders_L[k].model.set_value(self._rpyL[k])
+                self._rpyL = {"roll": float(euler[0]), "pitch": float(euler[1]), "yaw": float(euler[2])}
             else:
                 self._tgtR = {"x": float(pos[0]), "y": float(pos[1]), "z": float(pos[2])}
-                self._rpyR = {"roll": r, "pitch": p, "yaw": y}
-                # Sync sliders
-                for k in ["x", "y", "z"]:
-                    if k in self._tgt_sliders_R: self._tgt_sliders_R[k].model.set_value(self._tgtR[k])
-                for k in ["roll", "pitch", "yaw"]:
-                    if k in self._rpy_sliders_R: self._rpy_sliders_R[k].model.set_value(self._rpyR[k])
-                
+                self._rpyR = {"roll": float(euler[0]), "pitch": float(euler[1]), "yaw": float(euler[2])}
             self._sync_targets_to_stage()
-            self._set_status(f"{side} Target initialized from current pose")
-        except Exception as e:
-            self._set_status(f"Error setting {side} target: {e}")
+        except: pass
 
-    # ---------------- IK Step ----------------
+    def _reset_all_rpy(self):
+        self._rpyL = {"roll": 180.0, "pitch": 0.0, "yaw": 0.0}
+        self._rpyR = {"roll": 180.0, "pitch": 0.0, "yaw": 0.0}
+        self._sync_targets_to_stage()
+
+    # ---------------- IK 연산 및 실행 ----------------
     def _step_lula_ik(self, stage):
-        if stage is None or self.articulation is None:
-            return
-        if not self.articulation.handles_initialized:
-            return
-        if self.articulation.get_joint_positions() is None:
-            return
-            
-        if self.artik_left is None or self.artik_right is None:
-            return
-
-        # 1) Sync robot base pose to solvers (Crucial if robot moved from origin)
+        if stage is None or self.articulation is None: return
         pos_root, quat_root = self.articulation.get_world_pose()
         self.lula_left.set_robot_base_pose(pos_root, quat_root)
         self.lula_right.set_robot_base_pose(pos_root, quat_root)
 
-        # 2) Get targets
         tgtL = self._get_world_translation(stage, self.left_target_prim)
         tgtR = self._get_world_translation(stage, self.right_target_prim)
         qL_wxyz = self._get_world_quat_wxyz(stage, self.left_target_prim)
         qR_wxyz = self._get_world_quat_wxyz(stage, self.right_target_prim)
 
-        if tgtL is None or tgtR is None:
-            return
-
+        if tgtL is None or tgtR is None: return
         posL = np.array(tgtL, dtype=np.float32)
         posR = np.array(tgtR, dtype=np.float32)
+        oriL = quat_normalize_wxyz(qL_wxyz).astype(np.float32) if self._use_oriL else None
+        oriR = quat_normalize_wxyz(qR_wxyz).astype(np.float32) if self._use_oriR else None
 
-        # Use orientation from RPY if available AND enabled, else position-only
-        oriL = None
-        oriR = None
-        
-        if self._use_oriL and qL_wxyz is not None:
-            oriL = quat_normalize_wxyz(qL_wxyz).astype(np.float32)
-        if self._use_oriR and qR_wxyz is not None:
-            oriR = quat_normalize_wxyz(qR_wxyz).astype(np.float32)
-
-        # 3) Compute IK for both arms
         actionL, succL = self.artik_left.compute_inverse_kinematics(posL, oriL)
         actionR, succR = self.artik_right.compute_inverse_kinematics(posR, oriR)
 
-        # 4) Merge and Apply actions in one go to avoid overwriting
         combined_positions = []
         combined_indices = []
         
+        # 1) 팔 조인트 각도 병합
         if succL:
             combined_positions.extend(actionL.joint_positions)
             combined_indices.extend(actionL.joint_indices)
@@ -1082,156 +967,98 @@ class OpenArmAutoController(omni.ext.IExt):
             combined_positions.extend(actionR.joint_positions)
             combined_indices.extend(actionR.joint_indices)
 
+        # 2) 그리퍼 조인트 각도 병합 (인덱스 매핑 사용)
+        for name in ["openarm_left_finger_joint1", "openarm_right_finger_joint1"]:
+            handle = self.dof_handle_by_name.get(name)
+            idx = self.dof_index_by_name.get(name)
+            if handle is not None and idx is not None:
+                combined_positions.append(self.targets.get(handle, 0.0))
+                combined_indices.append(idx)
+
         if combined_indices:
-            merged_action = ArticulationAction(
-                joint_positions=np.array(combined_positions),
-                joint_indices=np.array(combined_indices)
-            )
+            merged_action = ArticulationAction(joint_positions=np.array(combined_positions), joint_indices=np.array(combined_indices))
             self.articulation.get_articulation_controller().apply_action(merged_action)
 
-        # 5) Status feedback
         self._set_status(f"IK Status -> Left:{'OK' if succL else 'FAIL'} Right:{'OK' if succR else 'FAIL'}")
 
-    # ---------------- Slider build ----------------
+    # ---------------- 슬라이더 생성 ----------------
     def _build_sliders(self):
         dof_count = self.dc.get_articulation_dof_count(self.art)
         name_map = {}
-
         for i in range(dof_count):
             dof = self.dc.get_articulation_dof(self.art, i)
             name = self.dc.get_dof_name(dof)
-            try:
-                cur = float(self.dc.get_dof_position(dof))
-            except Exception:
-                cur = 0.0
+            cur = float(self.dc.get_dof_position(dof))
             name_map[name] = (dof, cur)
-
         st = self._style()
-
         with self.left_container:
             self._section_header("Left Arm", CLR_LEFT)
-            for name in [n for n in VISIBLE_DOFS if is_left(n)]:
-                self._add_joint_row(name, name_map, st)
-
+            for name in [n for n in VISIBLE_DOFS if is_left(n)]: self._add_joint_row(name, name_map, st)
         with self.right_container:
             self._section_header("Right Arm", CLR_RIGHT)
-            for name in [n for n in VISIBLE_DOFS if is_right(n)]:
-                self._add_joint_row(name, name_map, st)
+            for name in [n for n in VISIBLE_DOFS if is_right(n)]: self._add_joint_row(name, name_map, st)
 
     def _add_joint_row(self, name: str, name_map: dict, st: dict):
-        if name not in name_map:
-            ui.Label(f"missing: {name}", style=st["muted"])
-            return
-
+        if name not in name_map: return
         dof, cur_rad = name_map[name]
         grip = (USE_GRIPPER_RAW and is_gripper(name))
-
-        if grip:
-            lo, hi = GRIPPER_RAW_LIMIT.get(name, (0.0, 0.04))
-            cur_ui = float(cur_rad)
-            unit = ""
-            tgt_ui = cur_ui
-            self.targets[dof] = float(cur_rad)
-        else:
-            lo, hi = JOINT_LIMIT_DEG.get(name, (-180.0, 180.0))
-            cur_ui = math.degrees(float(cur_rad))
-            unit = "deg"
-            tgt_ui = cur_ui
-            self.targets[dof] = float(cur_rad)
-
-        # Short joint name display (openarm_left_joint3 -> J3)
-        short = name.split("_")[-1].upper()
-        if "finger" in name.lower():
-            short = "GRIP"
-
+        if grip: lo, hi = GRIPPER_RAW_LIMIT.get(name, (0.0, 0.04)); cur_ui = cur_rad; unit = ""
+        else: lo, hi = JOINT_LIMIT_DEG.get(name, (-180, 180)); cur_ui = math.degrees(cur_rad); unit = "deg"
+        self.targets[dof] = float(cur_rad)
+        short = name.split("_")[-1].upper() if not grip else "GRIP"
         with ui.VStack(spacing=2):
             with ui.HStack(height=22):
-                ui.Label(f"{short}", style={"font_size": 14, "color": CLR_TEXT}, width=50)
-                lbl = ui.Label(
-                    f"cur:{fmt1(cur_ui)}{unit}  tgt:{fmt1(tgt_ui)}{unit}",
-                    style=st["curtgt"]
-                )
+                ui.Label(short, style={"font_size": 14, "color": CLR_TEXT}, width=50)
+                lbl = ui.Label(f"cur:{fmt1(cur_ui)}{unit}  tgt:{fmt1(cur_ui)}{unit}", style=st["curtgt"])
                 self.cur_tgt_labels[dof] = lbl
-
             s = ui.FloatSlider(min=float(lo), max=float(hi), style={"font_size": 12})
-            s.model.set_value(float(tgt_ui))
-
+            s.model.set_value(float(cur_ui))
             self.slider_by_dof[dof] = s
             self.dof_name_by_handle[dof] = name
-
-            s.model.add_value_changed_fn(
-                lambda m, n=name, h=dof, slider=s: self._on_joint_slider(n, h, slider)
-            )
-
-            with ui.HStack(height=16):
-                ui.Label(f"{fmt1(lo)}{unit}", style=st["range"], width=70)
-                ui.Spacer()
-                ui.Label(f"{fmt1(hi)}{unit}", style=st["range"], width=70,
-                         alignment=ui.Alignment.RIGHT_CENTER)
+            s.model.add_value_changed_fn(lambda m, n=name, h=dof: self._on_joint_slider(n, m, h))
 
     def _refresh_current_labels(self):
         for dof, slider in self.slider_by_dof.items():
             name = self.dof_name_by_handle.get(dof, "")
             grip = (USE_GRIPPER_RAW and is_gripper(name))
+            cur = float(self.dc.get_dof_position(dof))
+            tgt_ui = slider.model.get_value_as_float()
+            cur_ui = cur if grip else math.degrees(cur)
+            unit = "" if grip else "deg"
+            if dof in self.cur_tgt_labels: self.cur_tgt_labels[dof].text = f"cur:{fmt1(cur_ui)}{unit}  tgt:{fmt1(tgt_ui)}{unit}"
 
-            try:
-                cur = float(self.dc.get_dof_position(dof))
-            except Exception:
-                continue
+    def _on_joint_slider(self, dof_name: str, value_ui, dof_handle: int = None):
+        if not self._bound: return
+        
+        if dof_handle is None:
+            dof_handle = self.dof_handle_by_name.get(dof_name)
+        if dof_handle is None: return
 
-            try:
-                tgt_ui = float(slider.model.get_value_as_float())
-            except Exception:
-                tgt_ui = 0.0
-
-            if grip:
-                cur_ui = cur
-                unit = ""
+        # value_ui가 모델/슬라이더/수치값인지 확인하여 값을 추출합니다.
+        try:
+            if hasattr(value_ui, "get_value_as_float"):
+                val = float(value_ui.get_value_as_float())
+            elif hasattr(value_ui, "model"):
+                val = float(value_ui.model.get_value_as_float())
             else:
-                cur_ui = math.degrees(cur)
-                unit = "deg"
-
-            if dof in self.cur_tgt_labels:
-                self.cur_tgt_labels[dof].text = f"cur:{fmt1(cur_ui)}{unit}  tgt:{fmt1(tgt_ui)}{unit}"
-
-    def _on_joint_slider(self, dof_name: str, dof_handle: int, slider):
-        if not self._bound:
+                val = float(value_ui)
+        except Exception:
             return
 
-        # Prevent slider override in IK mode
-        if self.mode == "LULA_IK":
-            return
+        # IK 모드에서는 일반 조인트 슬라이더 무시 (그리퍼는 허용)
+        if self.mode == "LULA_IK" and not is_gripper(dof_name): return
 
-        val_ui = float(slider.model.get_value_as_float())
-        grip = (USE_GRIPPER_RAW and is_gripper(dof_name))
-
-        if grip:
-            self.targets[dof_handle] = val_ui
-        else:
-            self.targets[dof_handle] = math.radians(val_ui)
+        self.targets[dof_handle] = val if is_gripper(dof_name) else math.radians(val)
 
     def _on_zero_position(self):
-        if not self._bound:
-            self._set_status("Not bound yet (press Play)")
-            return
-
-        # Reset sliders to zero
-        for dof, slider in self.slider_by_dof.items():
-            slider.model.set_value(0.0)
-
-        # Reset JOINT mode targets to zero
-        for dof in list(self.targets.keys()):
-            self.targets[dof] = 0.0
-
+        if not self._bound: return
+        for dof, slider in self.slider_by_dof.items(): slider.model.set_value(0.0)
+        for dof in self.targets: self.targets[dof] = 0.0
         self._set_status("Zero Position applied")
-        self._refresh_current_labels()
 
     def on_shutdown(self):
         self._sub = None
-        if getattr(self, "window", None) is not None:
-            try:
-                self.window.destroy()
-            except Exception:
-                pass
-            self.window = None
-        self._set_status("shutdown")
+        if self.window: self.window.destroy(); self.window = None
+
+if __name__ == '__main__':
+    pass
