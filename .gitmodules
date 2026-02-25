@@ -1,0 +1,12 @@
+[submodule "src/openarm_can"]
+	path = src/openarm_can
+	url = https://github.com/enactic/openarm_can.git
+[submodule "src/openarm_description"]
+	path = src/openarm_description
+	url = https://github.com/enactic/openarm_description.git
+[submodule "src/openarm_teleop"]
+	path = src/openarm_teleop
+	url = https://github.com/enactic/openarm_teleop.git
+[submodule "src/openarm_ros2"]
+	path = src/openarm_ros2
+	url = https://github.com/pjs0209/openarm_ros2.git
