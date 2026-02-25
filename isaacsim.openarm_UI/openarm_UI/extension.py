@@ -163,6 +163,9 @@ class OpenArmAutoController(omni.ext.IExt):
 
         # 1. 로봇 USD 파일을 자동으로 불러옵니다.
         self._auto_open_stage(ext_id)
+        
+        # 내부 상태 변수 초기화
+        self._frame_cnt = 0
 
         # 로봇이 위치한 최상위 경로 설정
         self.robot_root_prim = "/World/openarm"
@@ -284,6 +287,7 @@ class OpenArmAutoController(omni.ext.IExt):
             "btn":        {"font_size": 14},
             "mode_joint": {"font_size": 14, "color": CLR_SUCCESS},
             "mode_ik":    {"font_size": 14, "color": CLR_HIGHLIGHT},
+            "mode_follower": {"font_size": 14, "color": CLR_RIGHT},
         }
 
     # =========================
@@ -313,6 +317,8 @@ class OpenArmAutoController(omni.ext.IExt):
                         with ui.HStack():
                             ui.Spacer(width=12)
                             self.status = ui.Label("", style=st["status"])
+                            ui.Spacer()
+                            ui.Spacer(width=12)
 
                 ui.Spacer(height=2)
 
@@ -524,25 +530,42 @@ class OpenArmAutoController(omni.ext.IExt):
 
     def _apply_mode_ui(self):
         is_joint = (self.mode == "JOINT")
+        is_follower = (self.mode == "FOLLOWER")
         try:
-            self.mode_joint_container.visible = is_joint
-            self.mode_ik_container.visible = not is_joint
+            self.mode_joint_container.visible = (is_joint or is_follower)
+            self.mode_ik_container.visible = (self.mode == "LULA_IK")
         except Exception:
             pass
 
         try:
-            if is_joint:
+            # FOLLOWER 모드에서는 슬라이더를 비활성화(read-only 느낌)로 보이게 처리할 수 있습니다.
+            for dof, slider in self.slider_by_dof.items():
+                slider.enabled = (self.mode == "JOINT" or (self.mode == "LULA_IK" and is_gripper(self.dof_name_by_handle.get(dof, ""))))
+        except Exception:
+            pass
+
+        try:
+            if self.mode == "JOINT":
                 self.mode_btn.text = "Mode: JOINT"
                 self.mode_btn.style = {"font_size": 13, "color": CLR_SUCCESS}
-            else:
+            elif self.mode == "LULA_IK":
                 self.mode_btn.text = "Mode: LULA_IK"
                 self.mode_btn.style = {"font_size": 13, "color": CLR_HIGHLIGHT}
+            elif self.mode == "FOLLOWER":
+                self.mode_btn.text = "Mode: FOLLOWER"
+                self.mode_btn.style = {"font_size": 13, "color": CLR_RIGHT}
         except Exception:
             pass
 
     def _toggle_mode(self):
-        # 모드 전환
-        self.mode = "LULA_IK" if self.mode == "JOINT" else "JOINT"
+        # 모드 전환: JOINT -> LULA_IK -> FOLLOWER -> JOINT
+        if self.mode == "JOINT":
+            self.mode = "LULA_IK"
+        elif self.mode == "LULA_IK":
+            self.mode = "FOLLOWER"
+        else:
+            self.mode = "JOINT"
+            
         self._apply_mode_ui()
 
         stage = omni.usd.get_context().get_stage()
@@ -624,6 +647,11 @@ class OpenArmAutoController(omni.ext.IExt):
                 
                 # [중요] 3D 화면에서 직접 큐브를 움직였는지 확인하고 UI를 갱신합니다.
                 self._sync_ui_from_viewport(stage)
+
+                if self.mode == "FOLLOWER":
+                    pass
+                else:
+                    pass
 
             # IK(기구학) 모드인 경우: 목표 큐브를 향해 로봇이 움직이도록 계산하여 명령을 내립니다.
             if self.mode == "LULA_IK" and self._lula_ready and self._articulation_ready:
@@ -1022,6 +1050,14 @@ class OpenArmAutoController(omni.ext.IExt):
             name = self.dof_name_by_handle.get(dof, "")
             grip = (USE_GRIPPER_RAW and is_gripper(name))
             cur = float(self.dc.get_dof_position(dof))
+            
+            # FOLLOWER 모드일 경우 슬라이더 위치를 현재 로봇 상태에 맞춤
+            if self.mode == "FOLLOWER":
+                self._is_syncing = True
+                cur_ui = cur if grip else math.degrees(cur)
+                slider.model.set_value(cur_ui)
+                self._is_syncing = False
+
             tgt_ui = slider.model.get_value_as_float()
             cur_ui = cur if grip else math.degrees(cur)
             unit = "" if grip else "deg"
@@ -1045,7 +1081,8 @@ class OpenArmAutoController(omni.ext.IExt):
         except Exception:
             return
 
-        # IK 모드에서는 일반 조인트 슬라이더 무시 (그리퍼는 허용)
+        # IK 또는 FOLLOWER 모드에서는 일반 조인트 슬라이더 무시 (FOLLOWER는 그리퍼도 포함)
+        if self.mode == "FOLLOWER": return
         if self.mode == "LULA_IK" and not is_gripper(dof_name): return
 
         self.targets[dof_handle] = val if is_gripper(dof_name) else math.radians(val)
