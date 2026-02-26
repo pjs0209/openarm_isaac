@@ -20,8 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'bimanual_converter = openarm_converters.bimanual_joint_state_converter:main',
-            'physical_leader_relay = openarm_converters.physical_leader_relay:main',
+            'sim_to_real_converter = openarm_converters.sim_to_real_converter:main',
+            'real_to_sim_converter = openarm_converters.real_to_sim_converter:main',
         ],
     },
 )
