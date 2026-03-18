@@ -9,3 +9,6 @@ category = "User"
 
 [[python.module]]
 name = "openarm_UI"
+
+[python.pip]
+modules = ["h5py"]

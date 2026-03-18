@@ -3,6 +3,13 @@ import os
 import math
 import numpy as np
 import traceback
+try:
+    import h5py
+    HAS_H5PY = True
+except ImportError:
+    HAS_H5PY = False
+import time
+from datetime import datetime
 
 import omni.ext  # 엔비디아 옴니버스 확장 프로그램 라이브러리
 import omni.ui as ui  # 옴니버스 사용자 인터페이스(UI) 제작 라이브러리
@@ -11,6 +18,7 @@ import omni.kit.app
 import omni.usd  # USD(Universal Scene Description) 데이터 처리
 from isaacsim.core.utils.rotations import euler_angles_to_quat, matrix_to_euler_angles
 from pxr import UsdGeom, Gf, Usd  # USD 지오메트리 및 기본 클래스
+import omni.kit.pipapi
 
 from omni.isaac.dynamic_control import _dynamic_control  # 로봇 물리 제어용 인터페이스
 from isaacsim.core.prims import SingleArticulation  # 관절 구조물(로봇) 핵심 모듈
@@ -18,6 +26,10 @@ from isaacsim.core.utils.types import ArticulationAction  # 로봇 제어 명령
 
 from isaacsim.robot_motion.motion_generation.lula.kinematics import LulaKinematicsSolver
 from isaacsim.robot_motion.motion_generation.articulation_kinematics_solver import ArticulationKinematicsSolver
+from omni.isaac.core.utils.xforms import get_world_pose
+from omni.isaac.core.utils.prims import get_prim_at_path
+import omni.kit.window.filepicker
+from omni.kit.window.filepicker import FilePickerDialog
 
 
 # =========================
@@ -151,6 +163,24 @@ class OpenArmAutoController(omni.ext.IExt):
         """
         print("=== Startup: OpenArm UI Control Panel ===")
 
+        # [Hotfix] h5py가 없을 경우 즉시 설치를 시도합니다.
+        try:
+            import h5py
+            print("[OpenArmAutoController] h5py is already installed.")
+        except ImportError:
+            print("[OpenArmAutoController] h5py not found. Installing via pipapi...")
+            try:
+                omni.kit.pipapi.install("h5py")
+                import h5py
+                print("[OpenArmAutoController] h5py installed successfully.")
+            except Exception as e:
+                print(f"[OpenArmAutoController] Failed to install h5py: {e}")
+
+        # 확장 프로그램의 루트 경로를 저장합니다.
+        self._ext_path = omni.kit.app.get_app().get_extension_manager().get_extension_path(ext_id)
+        self._h5_root = os.path.join(self._ext_path, "openarm_UI", "assets", "h5")
+        os.makedirs(self._h5_root, exist_ok=True)
+
         # 이전 윈도우가 열려있다면 정리합니다.
         if getattr(self, "window", None) is not None:
             try:
@@ -227,13 +257,20 @@ class OpenArmAutoController(omni.ext.IExt):
         self._rpy_sliders_R = {}
         self._grip_sliders_IK = {} # IK 모드용 그리퍼 슬라이더 추가 [복구]
 
-        # 데이터 동기화 및 상태 관리 변수들
+        # (기존 데이터 동기화 변수들 유지)
         self._is_syncing = False
         self._last_status = None
         self._printed_tb = False
-
-        self._last_cube_poseL = None # 큐브 움직임 감지용
+        self._last_cube_poseL = None
         self._last_cube_poseR = None
+
+        # --- [신규] HDF5 에피소드 레코딩 관련 변수 ---
+        self._h5_recording = False
+        self._h5_playing_back = False
+        self._h5_data_buffer = [] # [{step_data}, ...]
+        self._h5_filename = "episode_0.h5"
+        self._current_episode_idx = 0
+        self._last_recorded_episode = None # For quick playback
 
         # 3. 사용자 인터페이스(UI)를 만듭니다.
         self._build_ui()
@@ -280,10 +317,10 @@ class OpenArmAutoController(omni.ext.IExt):
             "title":      {"font_size": 22, "color": CLR_TEXT},
             "muted":      {"font_size": 14, "color": CLR_TEXT_DIM},
             "status":     {"font_size": 14, "color": CLR_WARNING},
-            "section":    {"font_size": 16, "color": CLR_TEXT},
-            "joint_name": {"font_size": 14, "color": CLR_TEXT},
+            "section":    {"font_size": 20, "color": CLR_TEXT},
+            "joint_name": {"font_size": 22, "color": CLR_TEXT, "font_weight": "bold"},
             "range":      {"font_size": 12, "color": CLR_TEXT_DIM},
-            "curtgt":     {"font_size": 13, "color": CLR_TEXT},
+            "curtgt":     {"font_size": 16, "color": CLR_TEXT},
             "btn":        {"font_size": 14},
             "mode_joint": {"font_size": 14, "color": CLR_SUCCESS},
             "mode_ik":    {"font_size": 14, "color": CLR_HIGHLIGHT},
@@ -322,17 +359,57 @@ class OpenArmAutoController(omni.ext.IExt):
 
                 ui.Spacer(height=2)
 
+                # -- [신규] HDF5 전용 컨트롤 바 (디자인 최종 개선) --
+                self.h5_bar = ui.VStack(spacing=6, visible=True)
+                with self.h5_bar:
+                    # 첫 번째 줄: 상태 표시 및 파일명 입력 (더 넓게)
+                    with ui.HStack(height=28, spacing=8):
+                        ui.Spacer(width=4)
+                        with ui.ZStack(width=150):
+                            ui.Rectangle(style={"background_color": 0xFF222222, "border_radius": 2})
+                            self.h5_status_label = ui.Label("H5: Ready", style={"font_size": 14, "color": CLR_TEXT, "font_weight": "bold"}, alignment=ui.Alignment.CENTER)
+                        
+                        ui.Spacer(width=20)
+
+                        ui.Label("Name:", width=45, style={"font_size": 15, "color": CLR_TEXT_DIM, "font_weight": "bold"})
+                        self.h5_name_field = ui.StringField(width=280)
+                        self.h5_name_field.style = {"background_color": 0xFF111111, "border_radius": 2, "font_size": 14, "color": CLR_TEXT}
+                        self.h5_name_field.model.set_value(self._h5_filename)
+                        self.h5_name_field.model.add_value_changed_fn(lambda m: setattr(self, "_h5_filename", m.get_value_as_string()))
+                        ui.Spacer()
+
+                    # 두 번째 줄: 큰 조작 버튼들 (까만 배경 + 흰색 글자, 폰트 14 볼드)
+                    with ui.HStack(height=30, spacing=8):
+                        ui.Spacer(width=4)
+                        # 버튼 스타일 (폰트 14, 볼드, 검은색 계열 배경, CLR_TEXT 색상)
+                        btn_st_final = {"font_size": 14, "border_radius": 2, "color": CLR_TEXT, "background_color": 0xFF2A2A2A, "font_weight": "bold"}
+                        
+                        ui.Button("REC", width=60, clicked_fn=self._on_h5_record_start, style=btn_st_final)
+                        ui.Button("SUCCESS", width=80, clicked_fn=lambda: self._on_h5_record_stop(True), style=btn_st_final)
+                        ui.Button("FAIL", width=60, clicked_fn=lambda: self._on_h5_record_stop(False), style=btn_st_final)
+                        
+                        ui.Spacer(width=40) # 녹화와 재생 버튼 사이 간격 추가
+                        
+                        ui.Button("PLAY", width=65, clicked_fn=self._on_h5_playback_start, style=btn_st_final)
+                        ui.Button("OPEN", width=80, clicked_fn=self._on_h5_browse, 
+                                  tooltip="Select file for playback", style=btn_st_final)
+                        ui.Spacer()
+
+                ui.Spacer(height=2)
+
                 # -- 조작 버튼 바 --
                 with ui.HStack(height=32, spacing=6):
-                    ui.Button("Zero", width=70, clicked_fn=self._on_zero_position,
-                               style={"font_size": 13})
+                    ui.Button("Zero", width=60, clicked_fn=self._on_zero_position,
+                               style={"font_size": 14})
+                    ui.Button("Start", width=60, clicked_fn=self._on_start_position,
+                               style={"font_size": 14})
                     self.mode_btn = ui.Button("Mode: JOINT", clicked_fn=self._toggle_mode,
-                                              style={"font_size": 13, "color": CLR_SUCCESS})
+                                              style={"font_size": 14, "color": CLR_SUCCESS})
                     ui.Spacer()
                     self.tab_left_btn = ui.Button("Left", width=65, clicked_fn=lambda: self._show_tab("left"),
-                                                   style={"font_size": 13, "color": CLR_LEFT})
+                                                   style={"font_size": 14, "color": CLR_LEFT})
                     self.tab_right_btn = ui.Button("Right", width=65, clicked_fn=lambda: self._show_tab("right"),
-                                                    style={"font_size": 13, "color": CLR_RIGHT})
+                                                    style={"font_size": 14, "color": CLR_RIGHT})
 
                 # -- 메인 콘텐츠 영역 --
                 with ui.ZStack():
@@ -346,7 +423,7 @@ class OpenArmAutoController(omni.ext.IExt):
                     # JOINT 모드 화면
                     self.mode_joint_container = ui.VStack(visible=True, spacing=6)
                     with self.mode_joint_container:
-                        with ui.ScrollingFrame(height=800):
+                        with ui.ScrollingFrame(height=900):
                             with ui.VStack(spacing=8):
                                 self.left_container = ui.VStack(spacing=4)
                                 self.right_container = ui.VStack(spacing=4)
@@ -358,9 +435,9 @@ class OpenArmAutoController(omni.ext.IExt):
         st = self._style()
 
         def slider_row(label, vmin, vmax, init, on_change, color=CLR_TEXT):
-            with ui.HStack(height=24, spacing=6):
-                ui.Label(label, width=20, style={"font_size": 14, "color": color})
-                s = ui.FloatSlider(min=vmin, max=vmax, style={"font_size": 12})
+            with ui.HStack(height=30, spacing=6):
+                ui.Label(label, width=30, style={"font_size": 20, "color": color, "font_weight": "bold"})
+                s = ui.FloatSlider(min=vmin, max=vmax, style={"font_size": 14})
                 s.model.set_value(float(init))
                 s.model.add_value_changed_fn(lambda m: on_change(float(m.get_value_as_float())))
             return s
@@ -369,13 +446,13 @@ class OpenArmAutoController(omni.ext.IExt):
             ui.Label("In LULA_IK mode, arms follow target position and orientation.", style=st["muted"], height=20)
 
             # --- 왼쪽 목표 지점 카드 ---
-            with ui.ZStack(height=270):
+            with ui.ZStack(height=320):
                 ui.Rectangle(style={"background_color": 0x40151515, "border_radius": 10})
                 with ui.VStack(spacing=2):
                     ui.Spacer(height=10)
-                    with ui.HStack(height=24):
+                    with ui.HStack(height=30):
                         ui.Spacer(width=15)
-                        ui.Label("Left Arm Target", style={"font_size": 15, "color": CLR_LEFT})
+                        ui.Label("Left Arm Target", style={"font_size": 22, "color": CLR_LEFT, "font_weight": "bold"})
                         ui.Spacer(width=15)
                     
                     with ui.HStack(height=24):
@@ -388,7 +465,7 @@ class OpenArmAutoController(omni.ext.IExt):
                         self._cb_oriL.model.add_value_changed_fn(lambda m: self._on_toggle_ori("L", m.get_value_as_bool()))
                         ui.Spacer(width=15)
 
-                    with ui.HStack(height=72): # 3 * 24
+                    with ui.HStack(height=90): # 3 * 30
                         ui.Spacer(width=15)
                         with ui.VStack(spacing=0):
                             self._tgt_sliders_L["x"] = slider_row("X", -1.0, 1.0, self._tgtL["x"], lambda v: self._on_target_slider("L", "x", v), CLR_LEFT)
@@ -403,16 +480,16 @@ class OpenArmAutoController(omni.ext.IExt):
                         ui.Label("Orientation (RPY Degrees)", style=st["muted"])
                         ui.Spacer(width=15)
 
-                    with ui.HStack(height=72):
+                    with ui.HStack(height=90): # 3 * 30
                         ui.Spacer(width=15)
                         with ui.VStack(spacing=0):
-                            self._rpy_sliders_L["roll"] = slider_row("R", -180.0, 180.0, self._rpyL["roll"], lambda v: self._on_target_rpy_slider("L", "roll", v), CLR_LEFT)
-                            self._rpy_sliders_L["pitch"] = slider_row("P", -90.0, 90.0, self._rpyL["pitch"], lambda v: self._on_target_rpy_slider("L", "pitch", v), CLR_LEFT)
-                            self._rpy_sliders_L["yaw"] = slider_row("Y", -180.0, 180.0, self._rpyL["yaw"], lambda v: self._on_target_rpy_slider("L", "yaw", v), CLR_LEFT)
+                            self._tgt_sliders_L["roll"]  = slider_row("R", -180.0, 180.0, self._rpyL["roll"],  lambda v: self._on_target_rpy_slider("L", "roll", v), CLR_LEFT)
+                            self._tgt_sliders_L["pitch"] = slider_row("P", -90.0, 90.0, self._rpyL["pitch"], lambda v: self._on_target_rpy_slider("L", "pitch", v), CLR_LEFT)
+                            self._tgt_sliders_L["yaw"]   = slider_row("Y", -180.0, 180.0, self._rpyL["yaw"],   lambda v: self._on_target_rpy_slider("L", "yaw", v), CLR_LEFT)
                         ui.Spacer(width=15)
 
                     # [추가] IK 모드에서도 그리퍼 슬라이더를 표시합니다. (이름 기반으로 상시 생성)
-                    with ui.HStack(height=24):
+                    with ui.HStack(height=32):
                         ui.Spacer(width=15)
                         left_grip_name = "openarm_left_finger_joint1"
                         self._grip_sliders_IK["L"] = slider_row("G", 0.0, 0.04, 0.0, 
@@ -421,13 +498,13 @@ class OpenArmAutoController(omni.ext.IExt):
                     ui.Spacer()
 
             # --- 오른쪽 목표 지점 카드 ---
-            with ui.ZStack(height=270):
+            with ui.ZStack(height=320):
                 ui.Rectangle(style={"background_color": 0x40151515, "border_radius": 10})
                 with ui.VStack(spacing=2):
                     ui.Spacer(height=10)
-                    with ui.HStack(height=24):
+                    with ui.HStack(height=30):
                         ui.Spacer(width=15)
-                        ui.Label("Right Arm Target", style={"font_size": 15, "color": CLR_RIGHT})
+                        ui.Label("Right Arm Target", style={"font_size": 22, "color": CLR_RIGHT, "font_weight": "bold"})
                         ui.Spacer(width=15)
                     
                     with ui.HStack(height=24):
@@ -440,7 +517,7 @@ class OpenArmAutoController(omni.ext.IExt):
                         self._cb_oriR.model.add_value_changed_fn(lambda m: self._on_toggle_ori("R", m.get_value_as_bool()))
                         ui.Spacer(width=15)
 
-                    with ui.HStack(height=72):
+                    with ui.HStack(height=90):
                         ui.Spacer(width=15)
                         with ui.VStack(spacing=0):
                             self._tgt_sliders_R["x"] = slider_row("X", -1.0, 1.0, self._tgtR["x"], lambda v: self._on_target_slider("R", "x", v), CLR_RIGHT)
@@ -455,16 +532,16 @@ class OpenArmAutoController(omni.ext.IExt):
                         ui.Label("Orientation (RPY Degrees)", style=st["muted"])
                         ui.Spacer(width=15)
 
-                    with ui.HStack(height=72):
+                    with ui.HStack(height=90):
                         ui.Spacer(width=15)
                         with ui.VStack(spacing=0):
-                            self._rpy_sliders_R["roll"] = slider_row("R", -180.0, 180.0, self._rpyR["roll"], lambda v: self._on_target_rpy_slider("R", "roll", v), CLR_RIGHT)
-                            self._rpy_sliders_R["pitch"] = slider_row("P", -90.0, 90.0, self._rpyR["pitch"], lambda v: self._on_target_rpy_slider("R", "pitch", v), CLR_RIGHT)
-                            self._rpy_sliders_R["yaw"] = slider_row("Y", -180.0, 180.0, self._rpyR["yaw"], lambda v: self._on_target_rpy_slider("R", "yaw", v), CLR_RIGHT)
+                            self._tgt_sliders_R["roll"]  = slider_row("R", -180.0, 180.0, self._rpyR["roll"],  lambda v: self._on_target_rpy_slider("R", "roll", v), CLR_RIGHT)
+                            self._tgt_sliders_R["pitch"] = slider_row("P", -90.0, 90.0, self._rpyR["pitch"], lambda v: self._on_target_rpy_slider("R", "pitch", v), CLR_RIGHT)
+                            self._tgt_sliders_R["yaw"]   = slider_row("Y", -180.0, 180.0, self._rpyR["yaw"],   lambda v: self._on_target_rpy_slider("R", "yaw", v), CLR_RIGHT)
                         ui.Spacer(width=15)
                     
-                    # [추가] IK 모드에서도 그리퍼 슬라이더를 표시합니다. (이름 기반으로 상시 생성)
-                    with ui.HStack(height=24):
+                    # [추가] IK 모드에서도 그리퍼 슬라이더를 표시합니다.
+                    with ui.HStack(height=32):
                         ui.Spacer(width=15)
                         right_grip_name = "openarm_right_finger_joint1"
                         self._grip_sliders_IK["R"] = slider_row("G", 0.0, 0.04, 0.0, 
@@ -476,9 +553,9 @@ class OpenArmAutoController(omni.ext.IExt):
 
             with ui.HStack(height=28, spacing=6):
                 ui.Button("Reset Targets", clicked_fn=self._reset_targets,
-                           style={"font_size": 13})
+                           style={"font_size": 14})
                 ui.Button("Set both to current", clicked_fn=self._reset_to_current_all,
-                           style={"font_size": 13})
+                           style={"font_size": 14})
             
             with ui.HStack(height=28, spacing=6):
                 ui.Button("Set left to current", clicked_fn=lambda: self._set_target_to_current("L"),
@@ -498,7 +575,7 @@ class OpenArmAutoController(omni.ext.IExt):
             ui.Rectangle(style={"background_color": CLR_ACCENT, "border_radius": 4})
             with ui.HStack():
                 ui.Spacer(width=8)
-                ui.Label(title, style={"font_size": 15, "color": color})
+                ui.Label(title, style={"font_size": 20, "color": color})
 
     def _show_tab(self, name: str):
         self._active_tab = name
@@ -512,11 +589,11 @@ class OpenArmAutoController(omni.ext.IExt):
 
         try:
             if name == "left":
-                self.tab_left_btn.style = {"font_size": 13, "color": CLR_LEFT}
-                self.tab_right_btn.style = {"font_size": 13, "color": CLR_TEXT_DIM}
+                self.tab_left_btn.style = {"font_size": 14, "color": CLR_LEFT}
+                self.tab_right_btn.style = {"font_size": 14, "color": CLR_TEXT_DIM}
             else:
-                self.tab_left_btn.style = {"font_size": 13, "color": CLR_TEXT_DIM}
-                self.tab_right_btn.style = {"font_size": 13, "color": CLR_RIGHT}
+                self.tab_left_btn.style = {"font_size": 14, "color": CLR_TEXT_DIM}
+                self.tab_right_btn.style = {"font_size": 14, "color": CLR_RIGHT}
         except Exception:
             pass
 
@@ -547,13 +624,17 @@ class OpenArmAutoController(omni.ext.IExt):
         try:
             if self.mode == "JOINT":
                 self.mode_btn.text = "Mode: JOINT"
-                self.mode_btn.style = {"font_size": 13, "color": CLR_SUCCESS}
+                self.mode_btn.style = {"font_size": 14, "color": CLR_SUCCESS}
+                self.record_bar.visible = False
             elif self.mode == "LULA_IK":
                 self.mode_btn.text = "Mode: LULA_IK"
-                self.mode_btn.style = {"font_size": 13, "color": CLR_HIGHLIGHT}
+                self.mode_btn.style = {"font_size": 14, "color": CLR_HIGHLIGHT}
+                self.record_bar.visible = False
             elif self.mode == "FOLLOWER":
                 self.mode_btn.text = "Mode: FOLLOWER"
-                self.mode_btn.style = {"font_size": 13, "color": CLR_RIGHT}
+                self.mode_btn.style = {"font_size": 14, "color": CLR_RIGHT}
+            
+            self.h5_bar.visible = True
         except Exception:
             pass
 
@@ -627,6 +708,7 @@ class OpenArmAutoController(omni.ext.IExt):
         """
         timeline = omni.timeline.get_timeline_interface()
         is_playing = timeline.is_playing()
+        curr_time = timeline.get_current_time()
 
         # 시뮬레이션이 중지되었다면 하드웨어 연결 정보를 초기화합니다.
         if not is_playing and self._bound:
@@ -679,6 +761,13 @@ class OpenArmAutoController(omni.ext.IExt):
 
             # 화면에 현재 로봇의 실제 위치값을 실시간으로 갱신합니다.
             self._refresh_current_labels()
+
+            # --- [신규] HDF5 레코딩 및 재생 루프 ---
+            if self._h5_recording:
+                self._record_h5_step(curr_time)
+            elif self._h5_playing_back:
+                self._playback_h5_step(curr_time)
+
             return
 
         # 시뮬레이션이 아직 시작되지 않았다면 대기 메시지를 표시합니다.
@@ -711,6 +800,7 @@ class OpenArmAutoController(omni.ext.IExt):
         self._init_single_articulation(stage)
         self._init_lula_and_artik()
         self._ensure_target_prims(stage)
+        
         # 처음 한 번만 UI 값을 화면에 반영합니다.
         self._sync_targets_to_stage()
 
@@ -1011,6 +1101,12 @@ class OpenArmAutoController(omni.ext.IExt):
 
     # ---------------- 슬라이더 생성 ----------------
     def _build_sliders(self):
+        # Clear existing rows to prevent duplication on Play/Stop
+        if getattr(self, "left_container", None):
+            self.left_container.clear()
+        if getattr(self, "right_container", None):
+            self.right_container.clear()
+
         dof_count = self.dc.get_articulation_dof_count(self.art)
         name_map = {}
         for i in range(dof_count):
@@ -1035,8 +1131,8 @@ class OpenArmAutoController(omni.ext.IExt):
         self.targets[dof] = float(cur_rad)
         short = name.split("_")[-1].upper() if not grip else "GRIP"
         with ui.VStack(spacing=2):
-            with ui.HStack(height=22):
-                ui.Label(short, style={"font_size": 14, "color": CLR_TEXT}, width=50)
+            with ui.HStack(height=30):
+                ui.Label(short, style={"font_size": 20, "color": CLR_TEXT, "font_weight": "bold"}, width=90)
                 lbl = ui.Label(f"cur:{fmt1(cur_ui)}{unit}  tgt:{fmt1(cur_ui)}{unit}", style=st["curtgt"])
                 self.cur_tgt_labels[dof] = lbl
             s = ui.FloatSlider(min=float(lo), max=float(hi), style={"font_size": 12})
@@ -1051,11 +1147,12 @@ class OpenArmAutoController(omni.ext.IExt):
             grip = (USE_GRIPPER_RAW and is_gripper(name))
             cur = float(self.dc.get_dof_position(dof))
             
-            # FOLLOWER 모드일 경우 슬라이더 위치를 현재 로봇 상태에 맞춤
+            # FOLLOWER 모드일 경우 슬라이더 위치와 타겟값을 현재 로봇 상태에 맞춤
             if self.mode == "FOLLOWER":
                 self._is_syncing = True
                 cur_ui = cur if grip else math.degrees(cur)
                 slider.model.set_value(cur_ui)
+                self.targets[dof] = float(cur) # H5 기록을 위해 타겟값도 실제와 동기화
                 self._is_syncing = False
 
             tgt_ui = slider.model.get_value_as_float()
@@ -1092,6 +1189,265 @@ class OpenArmAutoController(omni.ext.IExt):
         for dof, slider in self.slider_by_dof.items(): slider.model.set_value(0.0)
         for dof in self.targets: self.targets[dof] = 0.0
         self._set_status("Zero Position applied")
+
+    def _on_start_position(self):
+        """양팔을 사진과 같은 대칭적인 시작 포즈로 설정합니다."""
+        if not self._bound: return
+        
+        # 시작 포즈 정의 (도 단위/그리퍼는 Raw)
+        start_pose_deg = {
+            "openarm_left_joint1": -30,
+            "openarm_left_joint2": -20,
+            "openarm_left_joint3": 20,
+            "openarm_left_joint4": 130,
+            "openarm_left_joint5": -5.5,
+            "openarm_left_joint6": -3.00,
+            "openarm_left_joint7": 90.00,
+            "openarm_left_finger_joint1": 0.04,
+            
+            "openarm_right_joint1": 30,
+            "openarm_right_joint2": 20,
+            "openarm_right_joint3": -20,
+            "openarm_right_joint4": 130,
+            "openarm_right_joint5": 5.50,
+            "openarm_right_joint6": 3.00,
+            "openarm_right_joint7": -90.00,
+            "openarm_right_finger_joint1": 0.04,
+        }
+
+        self._is_syncing = True
+        try:
+            for dof, slider in self.slider_by_dof.items():
+                name = self.dof_name_by_handle.get(dof, "")
+                if name in start_pose_deg:
+                    val = start_pose_deg[name]
+                    slider.model.set_value(val)
+                    self.targets[dof] = val if is_gripper(name) else math.radians(val)
+        finally:
+            self._is_syncing = False
+            
+        self._set_status("Start Position applied")
+
+        self._set_status("Start Position applied")
+
+    # --- HDF5 에피소드 레코딩 및 재생 로직 ---
+    def _on_h5_record_start(self):
+        if not self._bound: return
+        if not HAS_H5PY:
+            self._set_status("Error: 'h5py' module not found. Check extension.toml.")
+            self.h5_status_label.text = "H5: ERR (no h5py)"
+            return
+        self._h5_recording = True
+        self._h5_playing_back = False
+        self._h5_data_buffer = []
+        self.h5_status_label.text = "H5: Recording..."
+        self._set_status("H5 Recording started.")
+
+    def _on_h5_record_stop(self, success: bool):
+        if not self._h5_recording: return
+        self._h5_recording = False
+        
+        # 데이터가 비어있으면 저장하지 않습니다.
+        data = self._h5_data_buffer
+        if not data:
+            self.h5_status_label.text = "H5: NO DATA"
+            self._set_status("H5 Save cancelled: No data recorded.")
+            return
+
+        self.h5_status_label.text = f"H5: Saving {'SUCCESS' if success else 'FAIL'}..."
+        
+        # 파일명 확인 (확장자 .h5 체크)
+        fname = self._h5_filename if self._h5_filename.endswith(".h5") else self._h5_filename + ".h5"
+        full_path = os.path.join(self._h5_root, fname)
+
+        # HDF5 파일로 저장
+        try:
+            # 기존 파일이 있으면 덮어씌웁니다 ('w' 모드 사용)
+            with h5py.File(full_path, "w") as f:
+                grp = f.create_group("episode_0")
+                
+                # 데이터 변환 (배열로 만들기)
+                data = self._h5_data_buffer
+                if not data: return
+
+                keys = data[0].keys()
+                for k in keys:
+                    v = np.array([d[k] for d in data])
+                    grp.create_dataset(k, data=v)
+                
+                # Metadata 추가
+                grp.attrs["success"] = success
+                grp.attrs["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                grp.attrs["robot"] = "openarm"
+                grp.attrs["num_steps"] = len(data)
+                
+                self._last_recorded_episode = "episode_0"
+            
+            self.h5_status_label.text = f"H5: Saved {fname} ({'OK' if success else 'NG'})"
+            self._set_status(f"H5 Saved: {full_path}")
+        except Exception as e:
+            print(f"H5 Save Error: {e}")
+            self.h5_status_label.text = "H5: SAVE ERROR"
+
+    def _on_h5_playback_start(self, file_path=None):
+        if not self._bound: return
+        
+        if file_path is None:
+            fname = self._h5_filename if self._h5_filename.endswith(".h5") else self._h5_filename + ".h5"
+            file_path = os.path.join(self._h5_root, fname)
+
+        if not os.path.exists(file_path): 
+            self._set_status(f"H5 File not found: {os.path.basename(file_path)}")
+            return
+            
+        try:
+            with h5py.File(file_path, "r") as f:
+                # 첫 번째 에피소드(혹은 episode_0)를 찾습니다.
+                ep_keys = [k for k in f.keys() if k.startswith("episode_")]
+                if not ep_keys: return
+                ep_key = ep_keys[0]
+                self._last_recorded_episode = ep_key
+                
+                # 빠른 재생을 위해 버퍼에 로드
+                grp = f[ep_key]
+                self._h5_data_buffer = []
+                
+                # num_steps가 속성에 없는 경우 데이터셋 길이를 통해 유추합니다.
+                if "num_steps" in grp.attrs:
+                    num_steps = grp.attrs["num_steps"]
+                else:
+                    # 'joint_pos' 등 아무 데이터셋 하나를 사용하여 길이를 가져옵니다.
+                    keys = [k for k in grp.keys() if isinstance(grp[k], h5py.Dataset)]
+                    if not keys: return
+                    num_steps = len(grp[keys[0]])
+                
+                # 키들을 다시 dict list로 복구 (단순화를 위해 각 스텝별로)
+                keys = [k for k in grp.keys()]
+                arrays = {k: grp[k][:] for k in keys}
+                for i in range(num_steps):
+                    step_dict = {k: arrays[k][i] for k in keys}
+                    self._h5_data_buffer.append(step_dict)
+            
+            self._h5_recording = False
+            self._h5_playing_back = True
+            self._playback_idx = 0
+            self._playback_start_time = omni.timeline.get_timeline_interface().get_current_time()
+            self.h5_status_label.text = f"H5: Playing {os.path.basename(file_path)}"
+            self._set_status(f"H5 Playback: {file_path}")
+        except Exception as e:
+            print(f"H5 Playback Error: {e}")
+            self.h5_status_label.text = "H5: PLAY ERROR"
+
+    def _on_h5_browse(self):
+        """파일 탐색기를 열어 H5 파일을 선택합니다."""
+        def on_selected(filename, dirname):
+            full_path = os.path.join(dirname, filename)
+            self._on_h5_playback_start(full_path)
+
+        def on_canceled(filename, dirname):
+            pass
+
+        self._file_picker = FilePickerDialog(
+            "Select HDF5 Episode for Playback",
+            apply_button_label="Play",
+            click_apply_handler=on_selected,
+            click_cancel_handler=on_canceled,
+            item_filter_fn=lambda item: item.is_folder or item.path.endswith(".h5"),
+            starting_directory=self._h5_root
+        )
+        self._file_picker.show()
+
+    def _record_h5_step(self, curr_time):
+        # 데이터 수집 (Joints, EE, Targets, Objects)
+        step_data = {}
+        step_data["timestamp"] = curr_time
+        step_data["step_index"] = len(self._h5_data_buffer)
+
+        # Joint States - 모든 VISIBLE_DOFS에 대해 저장 (데이터가 없으면 0.0)
+        pos = []
+        vel = []
+        target = []
+        for name in VISIBLE_DOFS:
+            handle = self.dof_handle_by_name.get(name)
+            if handle is not None:
+                pos.append(float(self.dc.get_dof_position(handle)))
+                vel.append(float(self.dc.get_dof_velocity(handle)))
+                target.append(float(self.targets.get(handle, 0.0)))
+            else:
+                pos.append(0.0)
+                vel.append(0.0)
+                target.append(0.0)
+        
+        step_data["joint_pos"] = np.array(pos, dtype=np.float32)
+        step_data["joint_vel"] = np.array(vel, dtype=np.float32)
+        step_data["joint_target"] = np.array(target, dtype=np.float32)
+        # obs/action 정의
+        step_data["obs"] = step_data["joint_pos"]
+        step_data["action"] = step_data["joint_target"]
+
+        # EE Pose (L/R)
+        def get_pose_helper(prim_path):
+            try:
+                p, q = get_world_pose(prim_path)
+                return np.concatenate([p, q]).astype(np.float32) # [x,y,z, w,x,y,z]
+            except:
+                return np.zeros(7, dtype=np.float32)
+
+        step_data["left_ee_pose"] = get_pose_helper(f"{self.robot_root_prim}/openarm_left_ee_tcp")
+        step_data["right_ee_pose"] = get_pose_helper(f"{self.robot_root_prim}/openarm_right_ee_tcp")
+        step_data["left_target_pose"] = get_pose_helper(self.left_target_prim)
+        step_data["right_target_pose"] = get_pose_helper(self.right_target_prim)
+
+        # Object Pose (World/Objects 하위 탐색)
+        obj_pose = np.zeros(7, dtype=np.float32)
+        stage = omni.usd.get_context().get_stage()
+        if stage:
+            obj_root = stage.GetPrimAtPath("/World/Objects")
+            if obj_root and obj_root.GetChildren():
+                first_obj = str(obj_root.GetChildren()[0].GetPath())
+                p, q = get_world_pose(first_obj)
+                obj_pose = np.concatenate([p, q]).astype(np.float32)
+        step_data["object_pose"] = obj_pose
+
+        self._h5_data_buffer.append(step_data)
+        self.h5_status_label.text = f"H5: Rec {len(self._h5_data_buffer)} steps"
+
+    def _playback_h5_step(self, curr_time):
+        if not self._h5_data_buffer:
+            self._h5_playing_back = False
+            return
+
+        elapsed = curr_time - self._playback_start_time
+        found_data = None
+        while self._playback_idx < len(self._h5_data_buffer):
+            d = self._h5_data_buffer[self._playback_idx]
+            t_rel = d["timestamp"] - self._h5_data_buffer[0]["timestamp"]
+            if t_rel >= elapsed:
+                found_data = d
+                break
+            self._playback_idx += 1
+        
+        if found_data:
+            joint_targets = found_data["joint_target"]
+            for i, name in enumerate(VISIBLE_DOFS):
+                handle = self.dof_handle_by_name.get(name)
+                if handle is not None:
+                    val = float(joint_targets[i])
+                    self.dc.set_dof_position_target(handle, val)
+                    self.targets[handle] = val
+                    
+                    # UI sync
+                    if not self._is_syncing:
+                        self._is_syncing = True
+                        grip = (USE_GRIPPER_RAW and is_gripper(name))
+                        val_ui = val if grip else math.degrees(val)
+                        self.slider_by_dof[handle].model.set_value(val_ui)
+                        self._is_syncing = False
+            self.h5_status_label.text = f"H5: Play {self._playback_idx}/{len(self._h5_data_buffer)}"
+        else:
+            self._h5_playing_back = False
+            self.h5_status_label.text = "H5: Done"
+            self._set_status("H5 Playback finished.")
 
     def on_shutdown(self):
         self._sub = None
